@@ -28,6 +28,7 @@
 namespace {
 
 using undercut::Driver;
+using undercut::OvertakeRule;
 using undercut::PitStrategy;
 using undercut::RaceSimulator;
 using undercut::Standing;
@@ -178,6 +179,7 @@ std::string formatDelta(double value) {
 }
 
 void printUsage(std::ostream& out) {
+    const OvertakeRule defaults;  // FR-9 defaults come from the core, not from here
     out <<
         "Undercut - F1 Pit-Stop & Race Strategy Scheduler\n"
         "\n"
@@ -210,6 +212,15 @@ void printUsage(std::ostream& out) {
         "  --lap-log N             Print the standings every N laps. Implies\n"
         "                          --simulate. 0 disables. Default 0.\n"
         "\n"
+        "Overtaking (FR-9, off by default):\n"
+        "  --overtake              A car that catches the one ahead is held\n"
+        "                          --min-gap behind it unless it is --pass-margin\n"
+        "                          a lap quicker. Implies --simulate.\n"
+        "  --min-gap SECONDS       Closest a car may follow across the line.\n"
+        "                          Default " << formatSeconds(defaults.minGap, 1) << ". Implies --overtake.\n"
+        "  --pass-margin SECONDS   Lap-time advantage needed to pass.\n"
+        "                          Default " << formatSeconds(defaults.passMargin, 1) << ". Implies --overtake.\n"
+        "\n"
         "Output:\n"
         "  --show-table            Print the per-compound stint-cost table.\n"
         "  -h, --help              This message.\n"
@@ -220,11 +231,13 @@ void printUsage(std::ostream& out) {
         "Examples:\n"
         "  undercut --laps 50 --pit-loss 22.0\n"
         "  undercut --laps 50 --rivals --lap-log 10\n"
+        "  undercut --laps 50 --rivals --overtake --lap-log 10\n"
         "  undercut --laps 4 --pit-loss 5 --sector 10 \\\n"
         "           --compound A:0:1:3 --compound B:2:0:4 --show-table\n";
 }
 
-void printSetup(const Track& track, const std::vector<TireCompound>& compounds) {
+void printSetup(const Track& track, const std::vector<TireCompound>& compounds,
+                const OvertakeRule& overtake) {
     std::cout << "Race setup\n";
     std::cout << "  Track       " << track.name() << '\n';
     std::cout << "  Laps        " << track.totalLaps() << '\n';
@@ -241,7 +254,12 @@ void printSetup(const Track& track, const std::vector<TireCompound>& compounds) 
         }
     }
     std::cout << '\n';
-    std::cout << "  Base lap    " << formatSeconds(track.baseLapTime()) << " s\n\n";
+    std::cout << "  Base lap    " << formatSeconds(track.baseLapTime()) << " s\n";
+    if (overtake.enabled) {
+        std::cout << "  Overtaking  on   min gap " << formatSeconds(overtake.minGap)
+                  << " s   pass margin " << formatSeconds(overtake.passMargin) << " s\n";
+    }
+    std::cout << '\n';
 
     std::cout << "Tire compounds\n";
     std::cout << "  " << std::left << std::setw(12) << "compound" << std::right
@@ -352,11 +370,18 @@ void printStandings(const RaceSimulator& simulator, const std::string& heading) 
     const std::vector<Standing> table = simulator.standings();
     const std::vector<Driver>& drivers = simulator.drivers();
 
+    // FR-9: time lost behind other cars. Only shown when it can be non-zero.
+    const bool showTraffic = simulator.overtakeRule().enabled;
+
     std::cout << heading << '\n';
     std::cout << "  " << std::right << std::setw(4) << "pos" << std::setw(4) << "#" << "  "
               << std::left << std::setw(16) << "driver" << std::setw(10) << "compound"
               << std::right << std::setw(5) << "age" << std::setw(7) << "stops"
-              << std::setw(16) << "race time" << std::setw(13) << "gap" << '\n';
+              << std::setw(16) << "race time" << std::setw(13) << "gap";
+    if (showTraffic) {
+        std::cout << std::setw(10) << "traffic";
+    }
+    std::cout << '\n';
 
     for (const Standing& row : table) {
         const Driver& driver = drivers[row.driverIndex];
@@ -365,8 +390,11 @@ void printStandings(const RaceSimulator& simulator, const std::string& heading) 
                   << std::setw(10) << driver.currentCompoundName() << std::right << std::setw(5)
                   << driver.tireAge() << std::setw(7) << driver.stopsMade() << std::setw(16)
                   << formatSeconds(driver.cumulativeTime()) << std::setw(13)
-                  << (row.position == 1 ? std::string("-") : formatSeconds(row.gapToLeader))
-                  << '\n';
+                  << (row.position == 1 ? std::string("-") : formatSeconds(row.gapToLeader));
+        if (showTraffic) {
+            std::cout << std::setw(10) << formatSeconds(driver.trafficLoss());
+        }
+        std::cout << '\n';
     }
     std::cout << '\n';
 }
@@ -420,6 +448,7 @@ struct Options {
     bool simulate = false;
     bool rivals = false;
     int lapLog = 0;
+    OvertakeRule overtake;  // validated by the core, in RaceSimulator::setOvertakeRule
     bool showHelp = false;
 };
 
@@ -488,6 +517,18 @@ Options parseArguments(int argc, char** argv) {
                 throw std::invalid_argument("--lap-log: must not be negative");
             }
             options.simulate = true;
+        } else if (arg == "--overtake") {
+            options.overtake.enabled = true;
+            options.simulate = true;
+        } else if (arg == "--min-gap") {
+            options.overtake.minGap = parseDouble(requireValue(argc, argv, i, arg), "--min-gap");
+            options.overtake.enabled = true;
+            options.simulate = true;
+        } else if (arg == "--pass-margin") {
+            options.overtake.passMargin =
+                parseDouble(requireValue(argc, argv, i, arg), "--pass-margin");
+            options.overtake.enabled = true;
+            options.simulate = true;
         } else {
             throw std::invalid_argument("unrecognised option \"" + arg +
                                         "\"; try --help");
@@ -532,11 +573,16 @@ int main(int argc, char** argv) {
 
         const PitStrategy strategy(track, compounds);
 
+        // Built before anything is printed, so a bad FR-9 setting is reported
+        // like any other usage error instead of halfway through the output.
+        RaceSimulator simulator(strategy.track(), strategy.compounds());
+        simulator.setOvertakeRule(options.overtake);
+
         std::cout << "============================================================\n"
                   << " UNDERCUT - F1 Pit-Stop & Race Strategy Scheduler\n"
                   << "============================================================\n\n";
 
-        printSetup(strategy.track(), strategy.compounds());
+        printSetup(strategy.track(), strategy.compounds(), simulator.overtakeRule());
 
         if (options.showTable) {
             printStintCostTable(strategy);
@@ -554,8 +600,6 @@ int main(int argc, char** argv) {
 
         if (options.simulate) {
             std::cout << '\n';
-
-            RaceSimulator simulator(strategy.track(), strategy.compounds());
 
             // FR-7: the stop laps come from the optimizer's backtracked plan.
             // No lap number is written by hand anywhere in this file.
@@ -587,7 +631,15 @@ int main(int argc, char** argv) {
                 printStandings(simulator, "Final classification");
             }
 
-            if (!printClosureCheck(result, simulator.drivers().front())) {
+            // FR-8 is defined on a single-driver, no-overtake race. Replay the
+            // plan alone, so rivals and traffic in the race above can never make
+            // the check fail spuriously. With FR-9 off this is the same number
+            // car 1 posted above, bit for bit: cars never interact.
+            RaceSimulator solo(strategy.track(), strategy.compounds());
+            solo.addDriver(1, "OPTIMAL", result);
+            solo.runToFinish();
+
+            if (!printClosureCheck(result, solo.drivers().front())) {
                 return kExitClosureFailed;
             }
         }

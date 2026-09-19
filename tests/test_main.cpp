@@ -13,8 +13,10 @@
 #include <cstdint>
 #include <cstddef>
 #include <algorithm>
+#include <initializer_list>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -33,6 +35,7 @@ namespace {
 using undercut::Driver;
 using undercut::Leaderboard;
 using undercut::LeaderboardEntry;
+using undercut::OvertakeRule;
 using undercut::PitStrategy;
 using undercut::PlannedStint;
 using undercut::RaceSimulator;
@@ -141,6 +144,65 @@ std::vector<TireCompound> handCheckCompounds() {
     set.emplace_back("A", 0.0, 1.0, 3);
     set.emplace_back("B", 2.0, 0.0, 4);
     return set;
+}
+
+/// The Stint form of a plan - what Driver and RaceSimulator::addDriver take -
+/// built by hand, so that no validation runs on the way in.
+std::vector<Stint> asStints(const std::vector<PlannedStint>& plan,
+                            const std::vector<TireCompound>& compounds) {
+    std::vector<Stint> stints;
+    int startLap = 1;
+    for (const PlannedStint& planned : plan) {
+        Stint stint;
+        stint.compoundIndex = planned.compoundIndex;
+        stint.compoundName = compounds[planned.compoundIndex].name();
+        stint.startLap = startLap;
+        stint.laps = planned.laps;
+        stints.push_back(stint);
+        startLap += planned.laps;
+    }
+    return stints;
+}
+
+/// Flat compounds for the FR-9 hand cases. Nothing degrades, so on a one-sector
+/// 100 s track every lap on a compound takes exactly 100 s + basePace, and each
+/// pace gap sits at a chosen place relative to a 1.0 s pass margin.
+std::vector<TireCompound> flatCompounds() {
+    std::vector<TireCompound> set;
+    set.emplace_back("FAST", 0.0, 0.0, 10);   // 100.0 s a lap
+    set.emplace_back("SLOW", 0.4, 0.0, 10);   // 100.4 s: 0.4 s off FAST, inside the margin
+    set.emplace_back("EDGE", 1.0, 0.0, 10);   // 101.0 s: exactly the margin off FAST
+    set.emplace_back("CRAWL", 1.5, 0.0, 10);  // 101.5 s: beyond the margin
+    return set;
+}
+
+constexpr std::size_t kFast = 0;
+constexpr std::size_t kSlow = 1;
+constexpr std::size_t kEdge = 2;
+constexpr std::size_t kCrawl = 3;
+
+/// A 3-lap race on the flat compounds - one 100 s sector, 20 s pit loss - with
+/// one car per plan, entered as car 1, 2, ... in order and run to the flag.
+/// With `overtaking`, the rule is set explicitly to minGap 0.5 s and
+/// passMargin 1.0 s, so the hand cases do not lean on the defaults.
+RaceSimulator flatRace(const std::vector<std::vector<PlannedStint>>& plans, bool overtaking) {
+    const Track track = makeTrack(3, 20.0, {100.0});
+    const PitStrategy strategy(track, flatCompounds());
+
+    RaceSimulator simulator(track, flatCompounds());
+    if (overtaking) {
+        OvertakeRule rule;
+        rule.enabled = true;
+        rule.minGap = 0.5;
+        rule.passMargin = 1.0;
+        simulator.setOvertakeRule(rule);
+    }
+    for (std::size_t i = 0; i < plans.size(); ++i) {
+        simulator.addDriver(static_cast<int>(i) + 1, "CAR" + std::to_string(i + 1U),
+                            strategy.evaluatePlan(plans[i]));
+    }
+    simulator.runToFinish();
+    return simulator;
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,6 +1070,338 @@ void testToleranceHelpers() {
     CHECK(undercut::kClosureTolerance > undercut::kTimeEpsilon);
 }
 
+void testStopsOutsideTheRace() {
+    beginSection("Edge cases: a stop on lap 0, and a stop after the final lap");
+
+    // A stop at the end of lap 0 is a zero-lap opening stint; a stop at the
+    // end of the final lap is a zero-lap closing stint. Both plans below still
+    // cover the 10-lap race exactly, so the lap-total check passes and ONLY
+    // the zero-lap guard stands between each plan and a phantom pit stop.
+    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const int laps = 10;
+    const Track track = makeTrack(laps, 20.0, {90.0});
+    const PitStrategy strategy(track, compounds);
+
+    const std::vector<PlannedStint> stopOnLapZero = {PlannedStint{0U, 0}, PlannedStint{0U, laps}};
+    const std::vector<PlannedStint> stopAfterFlag = {PlannedStint{0U, laps}, PlannedStint{0U, 0}};
+
+    CHECK_MSG(!strategy.evaluatePlan(stopOnLapZero).feasible,
+              "a stop at the end of lap 0 must be rejected");
+    CHECK_MSG(!strategy.evaluatePlan(stopAfterFlag).feasible,
+              "a stop at the end of the final lap must be rejected");
+
+    // Control: the same distance with the empty stint left out is legal.
+    const StrategyResult noStop = strategy.evaluatePlan({PlannedStint{0U, laps}});
+    CHECK(noStop.feasible);
+    CHECK(noStop.stopCount() == 0);
+
+    // The same two shapes at both simulator entry points.
+    CHECK_THROWS(Driver(1, "LAP-ZERO", asStints(stopOnLapZero, compounds)));
+    CHECK_THROWS(Driver(2, "AFTER-FLAG", asStints(stopAfterFlag, compounds)));
+
+    RaceSimulator simulator(track, compounds);
+    CHECK_THROWS(simulator.addDriver(1, "LAP-ZERO", asStints(stopOnLapZero, compounds)));
+    CHECK_THROWS(simulator.addDriver(2, "AFTER-FLAG", asStints(stopAfterFlag, compounds)));
+    CHECK_MSG(simulator.drivers().empty(), "a rejected plan must not leave a car behind");
+
+    // NFR-2: the lap total is summed once, at construction. It must still be
+    // the true total.
+    const Driver valid(3, "VALID", noStop.stints);
+    CHECK(valid.plannedLaps() == laps);
+    CHECK(!valid.finished());
+}
+
+void testOvertakeRuleSettings() {
+    beginSection("FR-9: rule settings and validation");
+
+    RaceSimulator simulator(makeTrack(10, 20.0, {90.0}), undercut::defaultCompounds());
+
+    CHECK_MSG(!simulator.overtakeRule().enabled, "overtaking must be off by default");
+    CHECK_NEAR(simulator.overtakeRule().minGap, 0.5, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().passMargin, 1.0, undercut::kTimeEpsilon);
+
+    OvertakeRule good;
+    good.enabled = true;
+    good.minGap = 0.8;
+    good.passMargin = 0.0;  // legal: any quicker car gets by
+    simulator.setOvertakeRule(good);
+    CHECK(simulator.overtakeRule().enabled);
+    CHECK_NEAR(simulator.overtakeRule().minGap, 0.8, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().passMargin, 0.0, undercut::kTimeEpsilon);
+
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    for (const double gap : {0.0, -0.5, undercut::kMinOvertakeGap / 2.0, inf, nan}) {
+        OvertakeRule bad = good;
+        bad.minGap = gap;
+        CHECK_THROWS(simulator.setOvertakeRule(bad));
+    }
+    for (const double margin : {-0.1, -inf, inf, nan}) {
+        OvertakeRule bad = good;
+        bad.passMargin = margin;
+        CHECK_THROWS(simulator.setOvertakeRule(bad));
+    }
+
+    // A rejected rule leaves the previous one in place.
+    CHECK_NEAR(simulator.overtakeRule().minGap, 0.8, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().passMargin, 0.0, undercut::kTimeEpsilon);
+
+    // The floor itself is accepted.
+    OvertakeRule atFloor = good;
+    atFloor.minGap = undercut::kMinOvertakeGap;
+    simulator.setOvertakeRule(atFloor);
+    CHECK_NEAR(simulator.overtakeRule().minGap, undercut::kMinOvertakeGap, undercut::kTimeEpsilon);
+}
+
+void testOvertakingHandCases() {
+    beginSection("FR-9: pass or hold, hand-computed");
+
+    const std::vector<PlannedStint> fast3 = {PlannedStint{kFast, 3}};
+    const double eps = undercut::kTimeEpsilon;
+
+    // (a) Equal pace from the grid. Every car starts at 0.0, so the grid is
+    // car-number order. On lap 1 each car is held exactly minGap behind the
+    // one ahead; after that it arrives exactly minGap behind - clear, not
+    // caught - and loses nothing more.
+    {
+        const RaceSimulator race = flatRace({fast3, fast3, fast3}, true);
+        const std::vector<Driver>& cars = race.drivers();
+        CHECK_NEAR(cars[0].cumulativeTime(), 300.0, eps);
+        CHECK_NEAR(cars[1].cumulativeTime(), 300.5, eps);
+        CHECK_NEAR(cars[2].cumulativeTime(), 301.0, eps);
+        CHECK_NEAR(cars[0].trafficLoss(), 0.0, eps);
+        CHECK_NEAR(cars[1].trafficLoss(), 0.5, eps);
+        CHECK_NEAR(cars[2].trafficLoss(), 1.0, eps);
+
+        // With the rule off the same three cars never interact.
+        const RaceSimulator noRule = flatRace({fast3, fast3, fast3}, false);
+        for (const Driver& car : noRule.drivers()) {
+            CHECK_NEAR(car.cumulativeTime(), 300.0, eps);
+            CHECK_NEAR(car.trafficLoss(), 0.0, eps);
+        }
+    }
+
+    // (b) Held by a slower car. Car 2 is 0.4 s a lap quicker - inside the
+    // 1.0 s margin - so it can never get by:
+    //   lap 1  car 1 crosses 100.4   car 2 would cross 100.0, held to 100.9  (0.9 lost)
+    //   lap 2  car 1 crosses 200.8   car 2 would cross 200.9, held to 201.3  (0.4 lost)
+    //   lap 3  car 1 crosses 301.2   car 2 would cross 301.3, held to 301.7  (0.4 lost)
+    {
+        const RaceSimulator race = flatRace({{PlannedStint{kSlow, 3}}, fast3}, true);
+        const std::vector<Driver>& cars = race.drivers();
+        CHECK_NEAR(cars[0].cumulativeTime(), 301.2, eps);
+        CHECK_NEAR(cars[1].cumulativeTime(), 301.7, eps);
+        CHECK_NEAR(cars[0].trafficLoss(), 0.0, eps);
+        CHECK_NEAR(cars[1].trafficLoss(), 1.7, eps);
+
+        const std::vector<Standing> table = race.standings();
+        CHECK_MSG(table.size() == 2U && table[0].driverIndex == 0U,
+                  "the held car must be classified behind the car holding it");
+        if (table.size() == 2U) {
+            CHECK_NEAR(table[1].gapToLeader, 0.5, eps);
+        }
+
+        // Without the rule the quicker car wins by 1.2 s: the hold reversed it.
+        const RaceSimulator noRule = flatRace({{PlannedStint{kSlow, 3}}, fast3}, false);
+        CHECK_NEAR(noRule.drivers()[0].cumulativeTime(), 301.2, eps);
+        CHECK_NEAR(noRule.drivers()[1].cumulativeTime(), 300.0, eps);
+    }
+
+    // (c) A clear pass: 1.5 s a lap quicker, beyond the margin. Car 2 takes
+    // the lead on lap 1 and loses nothing.
+    {
+        const RaceSimulator race = flatRace({{PlannedStint{kCrawl, 3}}, fast3}, true);
+        const std::vector<Driver>& cars = race.drivers();
+        CHECK_NEAR(cars[0].cumulativeTime(), 304.5, eps);
+        CHECK_NEAR(cars[1].cumulativeTime(), 300.0, eps);
+        CHECK_NEAR(cars[0].trafficLoss(), 0.0, eps);
+        CHECK_NEAR(cars[1].trafficLoss(), 0.0, eps);
+        CHECK_MSG(race.standings().front().driverIndex == 1U, "the quicker car must lead");
+    }
+
+    // (d) A pace advantage of exactly passMargin is enough to pass.
+    {
+        const RaceSimulator race = flatRace({{PlannedStint{kEdge, 3}}, fast3}, true);
+        CHECK_NEAR(race.drivers()[0].cumulativeTime(), 303.0, eps);
+        CHECK_NEAR(race.drivers()[1].cumulativeTime(), 300.0, eps);
+        CHECK_NEAR(race.drivers()[1].trafficLoss(), 0.0, eps);
+    }
+
+    // (e) The pit lane is not raced. Car 1 stops at the end of lap 1. Car 2 is
+    // held behind it on that lap - car 1 was on track in front of it - but car
+    // 1's 20 s pit loss is never treated as on-track time for car 2:
+    //   lap 1     car 1 crosses 100.0, then pits (120.0); car 2 held to 100.5
+    //   laps 2-3  car 2 leads in clean air; car 1 rejoins 19.5 s back
+    {
+        const RaceSimulator race =
+            flatRace({{PlannedStint{kFast, 1}, PlannedStint{kFast, 2}}, fast3}, true);
+        const std::vector<Driver>& cars = race.drivers();
+        CHECK(cars[0].stopsMade() == 1);
+        CHECK_NEAR(cars[0].cumulativeTime(), 320.0, eps);
+        CHECK_NEAR(cars[0].trafficLoss(), 0.0, eps);
+        CHECK_NEAR(cars[1].cumulativeTime(), 300.5, eps);
+        CHECK_NEAR(cars[1].trafficLoss(), 0.5, eps);
+    }
+
+    // (f) Cars on different lap counts never interact. Car 2 joins a lap late,
+    // so it is always a lap down on car 1 and is never held by it, even though
+    // its race clock is far smaller than car 1's.
+    {
+        const Track track = makeTrack(3, 20.0, {100.0});
+        const PitStrategy strategy(track, flatCompounds());
+        RaceSimulator simulator(track, flatCompounds());
+
+        OvertakeRule rule;
+        rule.enabled = true;
+        rule.minGap = 0.5;
+        rule.passMargin = 1.0;
+        simulator.setOvertakeRule(rule);
+
+        simulator.addDriver(1, "EARLY", strategy.evaluatePlan(fast3));
+        simulator.advanceLap();
+        simulator.addDriver(2, "LATE", strategy.evaluatePlan(fast3));
+        for (int guard = 0; guard < 10 && simulator.advanceLap(); ++guard) {
+            // advanceLap does the work; the guard bounds a broken loop
+        }
+
+        const std::vector<Driver>& cars = simulator.drivers();
+        CHECK(simulator.finished());
+        CHECK_NEAR(cars[0].cumulativeTime(), 300.0, eps);
+        CHECK_NEAR(cars[1].cumulativeTime(), 300.0, eps);
+        CHECK_NEAR(cars[1].trafficLoss(), 0.0, eps);
+    }
+}
+
+void testOvertakingProperties() {
+    beginSection("FR-9: properties over seeded fields");
+
+    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const int lastCompound = static_cast<int>(compounds.size()) - 1;
+    Lcg random(0x0BE7A11DULL);
+
+    bool anyHeld = false;
+
+    for (int trial = 0; trial < 30; ++trial) {
+        // Each draw is its own statement: argument evaluation order is
+        // unspecified, and the draws must happen in a fixed order (NFR-5).
+        const int laps = random.nextInt(1, 60);
+        const double pitLoss = random.nextDouble(0.0, 30.0);
+        const double baseLap = random.nextDouble(60.0, 110.0);
+        const Track track = makeTrack(laps, pitLoss, {baseLap});
+        const PitStrategy strategy(track, compounds);
+
+        // A field of random but legal plans, so cars meet on different
+        // compounds, at different tire ages, and around each other's stops.
+        const int carCount = random.nextInt(2, 8);
+        std::vector<StrategyResult> plans;
+        bool allFeasible = true;
+        for (int car = 0; car < carCount; ++car) {
+            std::vector<PlannedStint> plan;
+            for (int remaining = laps; remaining > 0;) {
+                const std::size_t c = static_cast<std::size_t>(random.nextInt(0, lastCompound));
+                const int longest = std::min(remaining, compounds[c].maxStintLaps());
+                const int length = random.nextInt(1, longest);
+                plan.push_back(PlannedStint{c, length});
+                remaining -= length;
+            }
+            plans.push_back(strategy.evaluatePlan(plan));
+            allFeasible = allFeasible && plans.back().feasible;
+        }
+
+        OvertakeRule rule;
+        rule.enabled = true;
+        rule.minGap = random.nextDouble(0.1, 1.5);
+        rule.passMargin = random.nextDouble(0.0, 2.0);
+
+        std::ostringstream detail;
+        detail << "trial " << trial << "  laps " << laps << "  cars " << carCount << "  minGap "
+               << rule.minGap << "  passMargin " << rule.passMargin;
+
+        CHECK_MSG(allFeasible, "every generated plan must be legal: " + detail.str());
+        if (!allFeasible) {
+            continue;
+        }
+
+        RaceSimulator off(track, compounds);  // never told about the rule
+        RaceSimulator on(track, compounds);
+        RaceSimulator onAgain(track, compounds);
+        on.setOvertakeRule(rule);
+        onAgain.setOvertakeRule(rule);
+
+        for (int car = 0; car < carCount; ++car) {
+            const std::string name = "CAR" + std::to_string(car + 1);
+            const StrategyResult& plan = plans[static_cast<std::size_t>(car)];
+            off.addDriver(car + 1, name, plan);
+            on.addDriver(car + 1, name, plan);
+            onAgain.addDriver(car + 1, name, plan);
+        }
+        off.runToFinish();
+        on.runToFinish();
+        onAgain.runToFinish();
+
+        for (std::size_t i = 0; i < plans.size(); ++i) {
+            const Driver& clean = off.drivers()[i];
+            const Driver& raced = on.drivers()[i];
+
+            // Off by default: every car runs exactly its own plan, untouched.
+            CHECK_NEAR(clean.cumulativeTime(), plans[i].totalTime, undercut::kClosureTolerance);
+            CHECK_NEAR(clean.trafficLoss(), 0.0, 0.0);
+
+            // On: the plan still runs lap for lap and stop for stop...
+            CHECK_MSG(raced.lapsCompleted() == laps, detail.str());
+            CHECK_MSG(raced.stopsMade() == plans[i].stopCount(), detail.str());
+
+            // ...traffic can only cost time, and costs exactly what it recorded.
+            CHECK_MSG(raced.trafficLoss() >= 0.0, detail.str());
+            CHECK_MSG(raced.cumulativeTime() >=
+                          clean.cumulativeTime() - undercut::kClosureTolerance,
+                      "traffic must never make a car faster: " + detail.str());
+            CHECK_NEAR(raced.cumulativeTime() - clean.cumulativeTime(), raced.trafficLoss(),
+                       undercut::kClosureTolerance);
+
+            // Deterministic: the same field twice gives the same race, exactly.
+            CHECK_NEAR(raced.cumulativeTime(), onAgain.drivers()[i].cumulativeTime(), 0.0);
+
+            anyHeld = anyHeld || raced.trafficLoss() > 0.0;
+        }
+
+        const std::vector<Standing> tableA = on.standings();
+        const std::vector<Standing> tableB = onAgain.standings();
+        bool sameOrder = (tableA.size() == tableB.size());
+        for (std::size_t i = 0; sameOrder && i < tableA.size(); ++i) {
+            sameOrder = (tableA[i].driverIndex == tableB[i].driverIndex);
+        }
+        CHECK_MSG(sameOrder, "identical input must give an identical classification: " +
+                                 detail.str());
+
+        // reset() must clear traffic losses with everything else, so that a
+        // rerun reproduces the first run exactly.
+        on.reset();
+        for (const Driver& driver : on.drivers()) {
+            CHECK_NEAR(driver.trafficLoss(), 0.0, 0.0);
+        }
+        on.runToFinish();
+        for (std::size_t i = 0; i < plans.size(); ++i) {
+            CHECK_NEAR(on.drivers()[i].cumulativeTime(), onAgain.drivers()[i].cumulativeTime(),
+                       0.0);
+        }
+
+        // FR-8 with the rule ON: a lone car is never obstructed, so the
+        // optimizer's own plan still closes within kClosureTolerance.
+        const StrategyResult best = strategy.optimize();
+        RaceSimulator solo(track, compounds);
+        solo.setOvertakeRule(rule);
+        solo.addDriver(1, "SOLO", best);
+        solo.runToFinish();
+        CHECK_NEAR(solo.drivers().front().cumulativeTime(), best.totalTime,
+                   undercut::kClosureTolerance);
+        CHECK_NEAR(solo.drivers().front().trafficLoss(), 0.0, 0.0);
+    }
+
+    CHECK_MSG(anyHeld, "the seeded fields must actually exercise the hold branch");
+}
+
 }  // namespace
 
 int main() {
@@ -1030,6 +1424,10 @@ int main() {
     testLeaderboard();
     testStandings();
     testDeterminism();
+    testStopsOutsideTheRace();
+    testOvertakeRuleSettings();
+    testOvertakingHandCases();
+    testOvertakingProperties();
 
     std::cout << "\n---------------------\n";
     std::cout << g_checks << " checks, " << g_failures << " failed\n";

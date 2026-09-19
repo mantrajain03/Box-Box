@@ -20,6 +20,42 @@ struct Standing {
     double gapToLeader = 0.0;     ///< seconds behind the car in P1
 };
 
+/// Smallest OvertakeRule::minGap that setOvertakeRule accepts, in seconds.
+///
+/// A held car crosses the line exactly minGap behind the car it is stuck
+/// behind. A gap far below a millisecond means nothing next to the comparison
+/// tolerance, and one small enough would round away entirely, leaving a dead
+/// heat that the car-number tie-break could settle in the held car's favour.
+inline constexpr double kMinOvertakeGap = 1.0e-3;
+
+/// FR-9: the deterministic "pass or hold" overtaking rule. Off by default.
+///
+/// Every car's own lap time still comes from PRD sec. 3.2, exactly as it does
+/// with the rule off: the rule never changes a car's pace, only when it
+/// crosses the line. Taking the running order at the start of the lap and
+/// walking it from P1 down, each car B is compared with the car A directly
+/// ahead of it, whose crossing time has already been settled:
+///
+///     arrival = B's start-of-lap time + B's lap time
+///     if arrival < A's crossing + minGap                 B has caught A
+///         if A's lap time - B's lap time >= passMargin   pass:  B keeps arrival
+///         else                                           held:  B crosses minGap behind A
+///     else                                               clear: B keeps arrival
+///
+/// Comparisons go through definitelyLess, never ==, so a car that arrives
+/// exactly minGap behind is clear and a pace advantage of exactly passMargin
+/// is enough to pass.
+///
+/// Pit loss is charged after the crossing is settled: the pit lane is not
+/// raced. Cars on different lap counts never interact, so lapped traffic is
+/// not modelled. A car that passes is not re-checked against cars further up
+/// the road on the same lap - a deliberate simplification.
+struct OvertakeRule {
+    bool enabled = false;
+    double minGap = 0.5;      ///< seconds; closest a car may follow across the line
+    double passMargin = 1.0;  ///< seconds per lap a car must be quicker to get by
+};
+
 /// Lap-by-lap race replay.
 ///
 /// Owns copies of the track and the compound set, so nothing here depends on
@@ -27,8 +63,9 @@ struct Standing {
 /// remain usable with no RaceSimulator in existence (NFR-3) - the dependency
 /// runs one way only.
 ///
-/// Overtaking is not modelled (FR-9 is not implemented yet), so every race run
-/// today is a no-overtake race: cars are independent and never interact.
+/// Cars are independent and never interact unless the FR-9 overtaking rule is
+/// switched on with setOvertakeRule(). It is off by default, and a lone car is
+/// never obstructed either way, so FR-8 closes with the rule on or off.
 class RaceSimulator {
 public:
     RaceSimulator(Track track, std::vector<TireCompound> compounds);
@@ -45,11 +82,24 @@ public:
     ///         the checks above.
     void addDriver(int number, std::string name, const StrategyResult& plan);
 
+    /// FR-9. Replace the overtaking rule; it applies from the next lap run.
+    /// \throws std::invalid_argument if minGap is not finite or is below
+    ///         kMinOvertakeGap, or passMargin is negative or not finite. A
+    ///         rejected rule leaves the current one in place.
+    void setOvertakeRule(const OvertakeRule& rule);
+
+    const OvertakeRule& overtakeRule() const noexcept { return overtakeRule_; }
+
     /// Advance every unfinished car by one lap. Returns false when the race is
-    /// already over. O(D) per call for D drivers.
+    /// already over.
+    ///
+    /// COST: O(D) per call for D drivers with overtaking off. With FR-9 on it
+    /// is O(D log D): the start-of-lap running order is drained from a
+    /// Leaderboard heap, then walked once.
     bool advanceLap();
 
-    /// Advance until every car has finished. O(N*D) for an N-lap race.
+    /// Advance until every car has finished. O(N*D) for an N-lap race, or
+    /// O(N*D log D) with overtaking on.
     void runToFinish();
 
     /// Put every car back on the grid.
@@ -99,12 +149,16 @@ public:
 private:
     void validatePlan(const std::vector<Stint>& plan) const;
 
+    /// One lap under the FR-9 rule. O(D log D).
+    void advanceLapWithTraffic();
+
     /// Turn an already-ordered entry list into positions and gaps. O(D).
     std::vector<Standing> toStandings(const std::vector<LeaderboardEntry>& ordered) const;
 
     Track track_;
     std::vector<TireCompound> compounds_;
     std::vector<Driver> drivers_;
+    OvertakeRule overtakeRule_;
     int lapsRun_ = 0;
 };
 

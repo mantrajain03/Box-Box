@@ -30,7 +30,8 @@ public:
     const std::string& name() const noexcept { return name_; }
     const std::vector<Stint>& plan() const noexcept { return plan_; }
 
-    /// Total laps this driver's plan covers. O(S) for an S-stint plan.
+    /// Total laps this driver's plan covers. O(1): the plan cannot change after
+    /// construction, so its lap total is summed once there.
     int plannedLaps() const noexcept;
 
     // --- mutable race state ------------------------------------------------
@@ -47,6 +48,11 @@ public:
     double cumulativeTime() const noexcept { return cumulativeTime_; }
     double lastLapTime() const noexcept { return lastLapTime_; }
 
+    /// FR-9. Seconds lost so far to being held up behind another car. Always
+    /// 0 with overtaking off, and never negative: traffic can only cost time.
+    double trafficLoss() const noexcept { return trafficLoss_; }
+
+    /// True once every planned lap has been run. O(1).
     bool finished() const noexcept;
 
     /// Index into the simulator's compound set for the stint in progress.
@@ -63,17 +69,20 @@ public:
 private:
     friend class RaceSimulator;
 
-    /// Charge one completed lap of `lapTime` seconds.
+    /// Charge one completed lap: `lapTime` seconds at the car's own pace, plus
+    /// `trafficDelay` seconds spent held up behind another car (FR-9; always
+    /// 0 with overtaking off).
     ///
     /// If the lap ended a stint that is followed by another, `pitLoss` is
     /// charged too and the driver switches to the next stint's compound with
     /// its tire age reset to 0 (FR-6). Returns true in exactly that case.
     /// No pit loss is charged after the final stint: the race has ended.
-    bool completeLap(double lapTime, double pitLoss) noexcept;
+    bool completeLap(double lapTime, double pitLoss, double trafficDelay = 0.0) noexcept;
 
     int number_;
     std::string name_;
     std::vector<Stint> plan_;
+    int plannedLaps_ = 0;  ///< sum of plan_'s stint lengths, fixed at construction
 
     std::size_t stintIndex_ = 0;
     int tireAge_ = 0;
@@ -81,6 +90,7 @@ private:
     int stopsMade_ = 0;
     double cumulativeTime_ = 0.0;
     double lastLapTime_ = 0.0;
+    double trafficLoss_ = 0.0;
 };
 
 }  // namespace undercut

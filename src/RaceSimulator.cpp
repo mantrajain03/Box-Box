@@ -1,6 +1,7 @@
 #include "undercut/RaceSimulator.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -57,6 +58,20 @@ void RaceSimulator::addDriver(int number, std::string name, const StrategyResult
     addDriver(number, std::move(name), plan.stints);
 }
 
+// Both checks run before anything is stored, so a rejected rule leaves the
+// current one in place.
+void RaceSimulator::setOvertakeRule(const OvertakeRule& rule) {
+    if (!std::isfinite(rule.minGap) || rule.minGap < kMinOvertakeGap) {
+        throw std::invalid_argument(
+            "RaceSimulator: overtake minGap must be finite and at least kMinOvertakeGap (1 ms)");
+    }
+    if (!std::isfinite(rule.passMargin) || rule.passMargin < 0.0) {
+        throw std::invalid_argument(
+            "RaceSimulator: overtake passMargin must be finite and not negative");
+    }
+    overtakeRule_ = rule;
+}
+
 bool RaceSimulator::finished() const noexcept {
     for (const Driver& driver : drivers_) {
         if (!driver.finished()) {
@@ -76,25 +91,83 @@ double RaceSimulator::lapTimeFor(const Driver& driver) const {
     return track_.baseLapTime() + compound.lapDelta(driver.tireAge());
 }
 
-// O(D) per lap.
+// O(D) per lap with overtaking off; O(D log D) with it on.
 bool RaceSimulator::advanceLap() {
     if (finished()) {
         return false;
     }
 
-    for (Driver& driver : drivers_) {
-        if (driver.finished()) {
-            continue;
+    if (overtakeRule_.enabled) {
+        advanceLapWithTraffic();
+    } else {
+        for (Driver& driver : drivers_) {
+            if (driver.finished()) {
+                continue;
+            }
+            driver.completeLap(lapTimeFor(driver), track_.pitLoss());
         }
-        driver.completeLap(lapTimeFor(driver), track_.pitLoss());
     }
 
     ++lapsRun_;
     return true;
 }
 
-// O(N*D). The loop is bounded by the race distance as well as by finished(),
-// so a future change that broke lap accounting would stop rather than hang.
+// FR-9, the "pass or hold" rule documented on OvertakeRule.
+//
+// COST: O(D log D) per lap - O(D) to snapshot and heapify, D pops at O(log D)
+// for the start-of-lap running order, then one O(D) walk. The order has to be
+// rebuilt every lap because every car's key changes every lap.
+//
+// Walking front to back means the car directly ahead has always been settled
+// before the car behind it is looked at, so each car needs only that one
+// neighbour's crossing time and pace.
+void RaceSimulator::advanceLapWithTraffic() {
+    Leaderboard board(snapshotEntries());
+    const std::vector<LeaderboardEntry> order = board.drainOrdered();
+
+    // The car directly ahead in the start-of-lap order, once settled.
+    bool haveAhead = false;
+    int aheadLaps = 0;
+    double aheadCrossing = 0.0;  // when it crossed the line, before any pit loss
+    double aheadPace = 0.0;      // its own lap time from sec. 3.2
+
+    for (const LeaderboardEntry& entry : order) {
+        Driver& driver = drivers_[entry.driverIndex];
+        if (driver.finished()) {
+            haveAhead = false;  // off the track, so it cannot hold anyone up
+            continue;
+        }
+
+        const double pace = lapTimeFor(driver);
+        const double arrival = driver.cumulativeTime() + pace;
+
+        const bool sameLap = haveAhead && aheadLaps == entry.lapsCompleted;
+        const double holdLine = aheadCrossing + overtakeRule_.minGap;
+        const bool caught = sameLap && definitelyLess(arrival, holdLine);
+        const bool canPass = !definitelyLess(aheadPace - pace, overtakeRule_.passMargin);
+
+        double delay = 0.0;
+        double crossing = arrival;
+        if (caught && !canPass) {
+            delay = holdLine - arrival;  // positive: caught means arrival < holdLine
+            crossing = holdLine;
+        }
+
+        // Pit loss, if this lap ends a stint, is charged inside completeLap. It
+        // never reaches `crossing`, which is all the car behind is compared
+        // against: the pit lane is not raced.
+        driver.completeLap(pace, track_.pitLoss(), delay);
+
+        haveAhead = true;
+        aheadLaps = entry.lapsCompleted;
+        aheadCrossing = crossing;
+        aheadPace = pace;
+    }
+}
+
+// O(N*D), or O(N*D log D) with overtaking on. The loop is bounded by the race
+// distance as well as by finished(), so a future change that broke lap
+// accounting would stop rather than hang.
 void RaceSimulator::runToFinish() {
     const int lapLimit = track_.totalLaps();
     while (lapsRun_ <= lapLimit && advanceLap()) {

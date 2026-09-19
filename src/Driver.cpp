@@ -12,15 +12,15 @@ Driver::Driver(int number, std::string name, std::vector<Stint> plan)
             throw std::invalid_argument(
                 "Driver: every planned stint must be at least one lap long");
         }
+        plannedLaps_ += stint.laps;
     }
 }
 
+// O(1). plan_ is fixed at construction, so its lap total is summed once there
+// rather than on every call: finished() runs several times per car per lap,
+// and re-summing would make every one of those calls O(S).
 int Driver::plannedLaps() const noexcept {
-    int laps = 0;
-    for (const Stint& stint : plan_) {
-        laps += stint.laps;
-    }
-    return laps;
+    return plannedLaps_;
 }
 
 bool Driver::finished() const noexcept {
@@ -50,6 +50,7 @@ void Driver::reset() noexcept {
     stopsMade_ = 0;
     cumulativeTime_ = 0.0;
     lastLapTime_ = 0.0;
+    trafficLoss_ = 0.0;
 }
 
 // FR-6. O(1).
@@ -58,13 +59,17 @@ void Driver::reset() noexcept {
 // first, then the stop is taken at the END of that lap. An m-stint plan
 // therefore charges m-1 pit losses, because the loop below never fires on the
 // final stint.
-bool Driver::completeLap(double lapTime, double pitLoss) noexcept {
+bool Driver::completeLap(double lapTime, double pitLoss, double trafficDelay) noexcept {
     if (finished()) {
         return false;
     }
 
-    cumulativeTime_ += lapTime;
-    lastLapTime_ = lapTime;
+    // lapTime + 0.0 is exactly lapTime, so a car that is never held up
+    // accumulates bit-for-bit the same total it did before FR-9 existed.
+    const double lapRun = lapTime + trafficDelay;
+    cumulativeTime_ += lapRun;
+    lastLapTime_ = lapRun;
+    trafficLoss_ += trafficDelay;
     ++lapsCompleted_;
     ++tireAge_;
 

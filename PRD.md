@@ -149,9 +149,56 @@ A plan with `m` stints makes `m - 1` stops. There is no stop before the first st
 | `TireCompound` | Name, `basePace` offset, degradation per lap, cliff lap + cliff rate, `maxStintLaps`. Provides `lapDelta(age)`. |
 | `PitStrategy` | Owns the prefix-sum table and the DP optimizer. Produces a `StrategyResult`. |
 | `StrategyResult` | Feasibility, stint list, pit laps, green time, pit time, total time, raw `dp[N]`. |
-| `Driver` | Number, name, assigned plan, current compound, tire age, cumulative time. |
+| `Driver` | Number, name, assigned plan, current compound, tire age, cumulative time, time lost to traffic (FR-9). |
 | `Leaderboard` | Min-heap over cumulative race time; ordered standings. |
-| `RaceSimulator` | Advances the race one lap at a time over all drivers. |
+| `RaceSimulator` | Advances the race one lap at a time over all drivers, optionally under the FR-9 overtaking rule. |
+| `OvertakeRule` | FR-9 settings: on/off, minimum following gap, pass margin (§3.6). Off by default. |
+
+### 3.6 Overtaking (FR-9)
+
+Agreed 2026-09-19. The rule is **off by default**; with it off, cars are independent and
+never interact, exactly as in §3.2–§3.4.
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `minGap` (δ) | 0.5 s | Closest a car may cross the line behind the car ahead. Must be finite and at least `kMinOvertakeGap` (1 ms). |
+| `passMargin` (Δ) | 1.0 s | Lap-time advantage over the car ahead needed to get past it. Must be finite and not negative. |
+
+Each lap:
+
+1. Take the running order at the start of the lap from the `Leaderboard` heap. At the
+   start every car's time is 0, so the grid is in car-number order.
+2. Compute each car's own lap time `L` from §3.2, unchanged. The rule never changes a
+   car's pace, only when it crosses the line.
+3. Walk that order from P1 down. Each car B is compared with the car A directly ahead of
+   it at the start of the lap, whose crossing time `C_A` has already been settled:
+
+   ```
+   arrival = T_B + L_B                     T_B = B's time at the start of the lap
+   if arrival < C_A + δ                    B has caught A
+       if L_A - L_B >= Δ   pass:   C_B = arrival
+       else                held:   C_B = C_A + δ
+   else                    clear:  C_B = arrival
+   ```
+
+   Comparisons go through `definitelyLess`, never `==`: a car arriving exactly δ behind
+   is clear, and an advantage of exactly Δ is enough to pass.
+4. Pit loss is added after the crossing is settled. The pit lane is not raced.
+
+Properties:
+
+- **Deterministic** — a fixed processing order, tolerance-based comparisons, no randomness.
+- **Traffic only costs time.** A held car's extra time is recorded as
+  `Driver::trafficLoss()`, and its race time is its own plan's time plus that loss,
+  to within `kClosureTolerance`.
+- **A lone car is never held up**, so FR-8 still closes with the rule on.
+- **Cars on different lap counts never interact**, so lapped traffic is not modelled.
+- **Known simplification:** a car that passes is not re-checked against cars further up
+  the road on the same lap.
+
+Why δ has a 1 ms floor: a held car crosses exactly δ behind the car ahead. A gap small
+enough to round away at race-length times would leave a dead heat, which the car-number
+tie-break could settle in the held car's favour.
 
 ---
 
@@ -169,7 +216,7 @@ Status values: **Done** · **In progress** · **Not started**.
 | **FR-6** | **Compound switching.** At each scheduled stop a driver takes on the next stint's compound and tire age resets to 0. | After a stop the driver reports the new compound and age 0; the pit loss is applied exactly once. | **Done** |
 | **FR-7** | **Plan-driven simulation.** At least one simulated driver is driven from a `StrategyResult` rather than hard-coded stop laps. | The driver's stops occur on the laps the optimizer chose, with no stop laps written by hand anywhere. | **Done** |
 | **FR-8** | **Loop closure.** Optimizer and simulator agree. | In a single-driver, no-overtake race, that driver's final cumulative time equals `StrategyResult::totalTime` within `kClosureTolerance`. **The tolerance must not be loosened to make this pass** — a failure here is a real bug. | **Done** |
-| **FR-9** | **Overtaking (optional).** A deterministic gap-threshold overtake rule. | Fully deterministic — identical input gives identical results across runs; disabled by default; the exact rule is agreed before implementation. | Not started (rule undecided) |
+| **FR-9** | **Overtaking (optional).** A deterministic gap-threshold overtake rule. | Fully deterministic — identical input gives identical results across runs; disabled by default; the exact rule is agreed before implementation. Agreed rule: §3.6. | **Done** |
 
 ### 4.1 CLI requirements
 
@@ -180,8 +227,9 @@ Status values: **Done** · **In progress** · **Not started**.
 | CLI-3 | Print the optimal plan: stints, compounds, stop laps, green/pit/total time. | **Done** |
 | CLI-4 | Print the stint-cost table on request, so a small case can be checked by hand. | **Done** |
 | CLI-5 | Reject malformed input with a clear message and a non-zero exit status. | **Done** |
-| CLI-6 | Replay the race from the optimizer's plan and report the FR-8 check, exiting 3 on failure. | **Done** |
+| CLI-6 | Replay the race from the optimizer's plan and report the FR-8 check, exiting 3 on failure. The check always runs on a solo replay, so rivals and traffic cannot affect it. | **Done** |
 | CLI-7 | Add reference cars on single-compound plans, and log standings every N laps. | **Done** |
+| CLI-8 | Switch on and tune the FR-9 overtaking rule (`--overtake`, `--min-gap`, `--pass-margin`), and show each driver's time lost to traffic. Output is unchanged when the rule is off. | **Done** |
 
 ---
 
@@ -209,7 +257,8 @@ Let `N` = race laps, `C` = number of compounds, `M` = largest `maxStintLaps`,
 | DP array `dp[0..N]` + `choice[0..N]` | `PitStrategy::optimize` | `O(N·C·M)` time, `O(N)` space. |
 | Backtrack | `PitStrategy::optimize` | `O(N)` worst case (every stint one lap). |
 | Binary min-heap | `Leaderboard` | `peek` `O(1)`, `push`/`pop` `O(log D)`, heapify constructor `O(D)`, `takeTop(k)` `O(D + k log D)`, `drainOrdered` `O(D log D)`. |
-| Lap advance | `RaceSimulator::advanceLap` | `O(D)` per lap, `O(N·D)` for a race. Each driver's lap is one `lapDelta` call, `O(1)`. |
+| Lap advance | `RaceSimulator::advanceLap` | `O(D)` per lap, `O(N·D)` for a race, with overtaking off. Each driver's lap is one `lapDelta` call, `O(1)`, and `Driver::finished()` is `O(1)` because the plan's lap total is summed once, at construction. |
+| Lap advance, FR-9 on | `RaceSimulator::advanceLapWithTraffic` | **`O(D log D)` per lap** — `O(D)` heapify and `D` pops for the start-of-lap order, then one `O(D)` walk — so `O(N·D log D)` for a race. The order is rebuilt every lap because every car's key changes every lap. |
 | Standings | `RaceSimulator::standings` | **`O(D log D)` per call** — `O(D)` heapify then `D` pops. Called once per lap that is `O(N·D log D)` over a race. A heap does **not** make a *full* ordering cheaper than sorting, and the comment says so. |
 | Top-k standings | `RaceSimulator::topK` | `O(D + k log D)`. This is where the heap actually beats a sort: the podium needs no full ordering. Every driver's key changes every lap, so no incremental scheme would help. |
 | Plan costing | `PitStrategy::buildResult` | `O(S)` for an `S`-stint plan. Shared by `optimize()` and `evaluatePlan()`. |
@@ -256,6 +305,7 @@ Example:
 ```
 bin/undercut --laps 50 --pit-loss 22.0
 bin/undercut --laps 50 --rivals --lap-log 10
+bin/undercut --laps 50 --rivals --overtake --lap-log 10
 bin/undercut --laps 4 --pit-loss 5 --sector 10 \
              --compound A:0:1:3 --compound B:2:0:4 --show-table --simulate
 ```
@@ -272,9 +322,9 @@ Exit status: `0` success, `1` bad usage, `2` no feasible strategy, `3` FR-8 fail
 | 1 | FR-1 optimizer: DP fill and backtrack. | Complete |
 | 2 | FR-5, FR-6 simulation fidelity: `Driver`, `RaceSimulator`. | Complete |
 | 3 | FR-7, FR-8 loop closure, verified non-vacuous by fault injection. | Complete |
-| 4 | FR-2 min-heap leaderboard and NFR-4 zero warnings done. **FR-9 overtaking deliberately not implemented** — the rule needs approval first. | Partial |
-| 5 | `make test` C++ assert harness: 1664 checks, brute-force DP reference, fault-injection verified. | Complete |
-| 6 | GUI. | Pending |
+| 4 | FR-2 min-heap leaderboard, FR-9 "pass or hold" overtaking (rule agreed 2026-09-19, §3.6) and NFR-4 zero warnings. NFR-2 audit fix: `Driver::finished()` re-summed the plan on every call (`O(S)`), which made the `O(1)` / `O(D)` claims above untrue; it is now `O(1)`. | Complete |
+| 5 | `make test` C++ assert harness: 3311 checks, brute-force DP reference, fault-injection verified. | Complete |
+| 6 | GUI: Dear ImGui with its Win32 + OpenGL3 backends (§9, question 3). | Pending |
 
 ---
 
@@ -296,19 +346,31 @@ rather than only the first. A non-zero exit fails the target.
 | FR-1 extremes | Zero pit loss gives one stint per lap on the quickest fresh compound; an unaffordable stop collapses to the fewest legal stints, or none. |
 | FR-5 / FR-6 | Lap times track the fitted compound and age; compound switches and age resets at the stop. |
 | FR-7 / FR-8 | 60 seeded races driven from `StrategyResult`, each closing within `kClosureTolerance`. |
-| Edge cases | 0 laps, 1 lap, no planned stops, a stop before the final lap, single-sector track, zero-lap stints rejected at both entry points. |
+| Edge cases | 0 laps, 1 lap, no planned stops, a stop before the final lap, single-sector track, zero-lap stints rejected at both entry points. A stop on lap 0 and a stop after the final lap, each with a correct lap total so that only the zero-lap guard can reject it, at all three entry points. |
 | FR-2 | Heap order matches a brute-force sort over 30 seeded fields, via both heapify and repeated push; `takeTop` is a prefix of the full order; empty-heap access throws. |
 | NFR-5 | Repeated `optimize()` and repeated races are identical; `reset()` restores the grid exactly. |
+| FR-9 settings | Off by default, with the documented defaults; every invalid `minGap` / `passMargin` rejected, and a rejected rule leaves the previous one in place. |
+| FR-9 hand cases | Six 3-lap races on flat compounds: equal pace from the grid, held by a slower car, a clear pass, exactly the pass margin, the pit lane not raced, cars on different laps. |
+| FR-9 properties | 30 seeded fields: with the rule off every car runs exactly its own plan; with it on, traffic never makes a car faster and the extra time equals `trafficLoss()` within `kClosureTolerance`; results repeat exactly, including after `reset()`; a lone car still closes FR-8. |
 
 The harness was itself checked by fault injection: removing the right-child
 comparison from `siftDown` produced 108 failures, and charging a pit stop after
 the final stint produced 295. Both were reverted.
+
+A second round on 2026-09-19 built nine one-line mutants in throwaway copies, and
+all nine were caught. Deleting the zero-lap guard from `buildResult`, which the
+suite had previously missed, now fails 2 checks. Removing the FR-9 same-lap
+guard, requiring more than `passMargin` to pass, and letting pit loss leak into
+the crossing time each fail 2 checks, in the hand case aimed at them. Holding a
+car without the gap failed 127 checks, not clearing traffic loss in `reset()` 106,
+dropping the traffic delay from race time 120, applying the rule while switched
+off 347, and never summing the cached lap total 691.
 
 ## 9. Open questions
 
 | # | Question | State |
 | --- | --- | --- |
 | 1 | Does `compound.basePace` replace or add to the track's base lap time? | **Resolved — additive** (§3.2). Per-track recalibration deferred. |
-| 2 | What exactly is the FR-9 overtake rule? | **Open.** To be proposed and approved before Phase 4. |
-| 3 | GUI route: Dear ImGui + GLFW vendored under `third_party/`, or an ANSI-escape terminal UI? | **Open.** Machine probed 2026-09-18: **GLFW absent** (no headers, no `libglfw3.a`, no DLL). **OpenGL present** — `GL/gl.h`, `GL/glext.h`, `KHR/khrplatform.h` in `ucrt64`, and `-lopengl32 -lgdi32` links. So GLFW would have to be vendored as source, or an ImGui Win32 backend used instead. |
+| 2 | What exactly is the FR-9 overtake rule? | **Resolved 2026-09-19 — "pass or hold"** (§3.6). |
+| 3 | GUI route: Dear ImGui + GLFW vendored under `third_party/`, or an ANSI-escape terminal UI? | **Resolved 2026-09-19 — Dear ImGui with its own Win32 + OpenGL3 backends**, vendored as source under `third_party/imgui/`; no GLFW. Probed 2026-09-18 and again 2026-09-19: **GLFW absent** (no headers, no `libglfw3.a`, no DLL, no package). **OpenGL present**, and `-lopengl32 -lgdi32 -ldwmapi -limm32` link with GCC 13.2. This route is all C++, so the build needs no C compiler rule. The GUI will be Windows-only; the core, CLI and tests stay portable. |
 | 4 | Should the cliff model stay, or should degradation be purely linear? | **Open.** Cliff implemented (§3.2); set `cliffLap < 0` to disable per compound. |
