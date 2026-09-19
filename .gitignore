@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Undercut — build output
+# ---------------------------------------------------------------------------
+build/
+bin/
+
+# Object / dependency / archive artefacts, wherever they land
+*.o
+*.obj
+*.d
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.exp
+*.ilk
+*.pdb
+
+# ---------------------------------------------------------------------------
+# Phase 6: Dear ImGui + GLFW are vendored as SOURCE under third_party/ and are
+# meant to be committed. Only their build output is ignored.
+# ---------------------------------------------------------------------------
+third_party/**/build/
+third_party/**/*.o
+third_party/**/*.a
+
+# ---------------------------------------------------------------------------
+# Editors / IDEs
+# ---------------------------------------------------------------------------
+.history/
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+.cache/
+compile_commands.json
+
+# ---------------------------------------------------------------------------
+# Debugging / profiling / sanitizer output
+# ---------------------------------------------------------------------------
+*.dSYM/
+*.su
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+core
+core.*
+vgcore.*
+callgrind.out.*
+perf.data
+perf.data.old
+
+# ---------------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
