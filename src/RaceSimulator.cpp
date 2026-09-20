@@ -1,13 +1,13 @@
-#include "undercut/RaceSimulator.hpp"
+#include "boxbox/RaceSimulator.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
 
-#include "undercut/Common.hpp"
+#include "boxbox/Common.hpp"
 
-namespace undercut {
+namespace boxbox {
 
 RaceSimulator::RaceSimulator(Track track, std::vector<TireCompound> compounds)
     : track_(std::move(track)), compounds_(std::move(compounds)) {
@@ -229,4 +229,4 @@ std::vector<Standing> RaceSimulator::topK(std::size_t count) const {
     return toStandings(board.takeTop(count));
 }
 
-}  // namespace undercut
+}  // namespace boxbox

@@ -1,14 +1,14 @@
-#ifndef UNDERCUT_PIT_STRATEGY_HPP
-#define UNDERCUT_PIT_STRATEGY_HPP
+#ifndef BOXBOX_PIT_STRATEGY_HPP
+#define BOXBOX_PIT_STRATEGY_HPP
 
 #include <cstddef>
 #include <string>
 #include <vector>
 
-#include "undercut/TireCompound.hpp"
-#include "undercut/Track.hpp"
+#include "boxbox/TireCompound.hpp"
+#include "boxbox/Track.hpp"
 
-namespace undercut {
+namespace boxbox {
 
 /// A stint as a caller specifies it: which compound, and for how many laps.
 /// The minimal input form, before any cost has been worked out.
@@ -133,6 +133,6 @@ private:
     std::vector<std::vector<double>> ageCostPrefix_;
 };
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_PIT_STRATEGY_HPP
+#endif  // BOXBOX_PIT_STRATEGY_HPP

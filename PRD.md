@@ -1,4 +1,4 @@
-# PRD — Undercut
+# PRD — Box Box
 
 **F1 Pit-Stop & Race Strategy Scheduler**
 Repository: `Box-Box` · Language: C++17 · Status: in development
@@ -7,7 +7,7 @@ Repository: `Box-Box` · Language: C++17 · Status: in development
 
 ## 1. Overview
 
-Undercut computes the *optimal pit-stop schedule* for a single-class motor race and
+Box Box computes the *optimal pit-stop schedule* for a single-class motor race and
 then replays that race lap by lap to confirm the schedule is achievable.
 
 A race is `N` laps. A car's lap time depends on the circuit, on which tire compound it
@@ -75,7 +75,7 @@ The following are **out of scope** and must not be added:
 - A pit stop is recorded as *"at the end of lap k"*. A stop at the end of lap `k`
   means laps `1…k` were the outgoing stint and lap `k+1` starts the next one.
 - Floating-point values are **never** compared with `==`. All comparisons go through
-  the named tolerances in `include/undercut/Common.hpp`.
+  the named tolerances in `include/boxbox/Common.hpp`.
 
 ### 3.2 The lap-time cost model
 
@@ -303,10 +303,10 @@ trusting `%OS%`, so the same file works from PowerShell, MSYS2 bash and Linux.
 Example:
 
 ```
-bin/undercut --laps 50 --pit-loss 22.0
-bin/undercut --laps 50 --rivals --lap-log 10
-bin/undercut --laps 50 --rivals --overtake --lap-log 10
-bin/undercut --laps 4 --pit-loss 5 --sector 10 \
+bin/boxbox --laps 50 --pit-loss 22.0
+bin/boxbox --laps 50 --rivals --lap-log 10
+bin/boxbox --laps 50 --rivals --overtake --lap-log 10
+bin/boxbox --laps 4 --pit-loss 5 --sector 10 \
              --compound A:0:1:3 --compound B:2:0:4 --show-table --simulate
 ```
 

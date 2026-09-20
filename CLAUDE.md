@@ -1,4 +1,4 @@
-# Project: Undercut — F1 Pit-Stop & Race Strategy Scheduler
+# Project: Box Box — F1 Pit-Stop & Race Strategy Scheduler
 
 You are working in an existing C++ repository. Before touching any code, read `PRD.md`
 in full — it is the specification and it overrides any assumption you make. Then read

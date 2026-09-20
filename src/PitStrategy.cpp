@@ -1,12 +1,12 @@
-#include "undercut/PitStrategy.hpp"
+#include "boxbox/PitStrategy.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
 
-#include "undercut/Common.hpp"
+#include "boxbox/Common.hpp"
 
-namespace undercut {
+namespace boxbox {
 
 int StrategyResult::plannedLaps() const noexcept {
     int laps = 0;
@@ -277,4 +277,4 @@ StrategyResult PitStrategy::optimize() const {
     return result;
 }
 
-}  // namespace undercut
+}  // namespace boxbox

@@ -1,10 +1,10 @@
-#ifndef UNDERCUT_TIRE_COMPOUND_HPP
-#define UNDERCUT_TIRE_COMPOUND_HPP
+#ifndef BOXBOX_TIRE_COMPOUND_HPP
+#define BOXBOX_TIRE_COMPOUND_HPP
 
 #include <string>
 #include <vector>
 
-namespace undercut {
+namespace boxbox {
 
 /// A tire compound's deterministic pace model (PRD FR-4, sec. 3.2).
 ///
@@ -24,7 +24,7 @@ namespace undercut {
 /// degradation purely linear.
 ///
 /// Depends on nothing but the standard library and can be used with no other
-/// Undercut type in existence (NFR-3).
+/// Box Box type in existence (NFR-3).
 class TireCompound {
 public:
     /// \param name                   display name, e.g. "SOFT"
@@ -75,6 +75,6 @@ private:
 /// quicker, degrade faster and cannot run as long.
 std::vector<TireCompound> defaultCompounds();
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_TIRE_COMPOUND_HPP
+#endif  // BOXBOX_TIRE_COMPOUND_HPP

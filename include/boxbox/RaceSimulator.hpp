@@ -1,17 +1,17 @@
-#ifndef UNDERCUT_RACE_SIMULATOR_HPP
-#define UNDERCUT_RACE_SIMULATOR_HPP
+#ifndef BOXBOX_RACE_SIMULATOR_HPP
+#define BOXBOX_RACE_SIMULATOR_HPP
 
 #include <cstddef>
 #include <string>
 #include <vector>
 
-#include "undercut/Driver.hpp"
-#include "undercut/Leaderboard.hpp"
-#include "undercut/PitStrategy.hpp"
-#include "undercut/TireCompound.hpp"
-#include "undercut/Track.hpp"
+#include "boxbox/Driver.hpp"
+#include "boxbox/Leaderboard.hpp"
+#include "boxbox/PitStrategy.hpp"
+#include "boxbox/TireCompound.hpp"
+#include "boxbox/Track.hpp"
 
-namespace undercut {
+namespace boxbox {
 
 /// One row of the classification.
 struct Standing {
@@ -162,6 +162,6 @@ private:
     int lapsRun_ = 0;
 };
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_RACE_SIMULATOR_HPP
+#endif  // BOXBOX_RACE_SIMULATOR_HPP

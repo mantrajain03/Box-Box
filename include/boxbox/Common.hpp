@@ -1,17 +1,17 @@
-#ifndef UNDERCUT_COMMON_HPP
-#define UNDERCUT_COMMON_HPP
+#ifndef BOXBOX_COMMON_HPP
+#define BOXBOX_COMMON_HPP
 
 #include <cmath>
 #include <limits>
 
-/// Undercut: F1 pit-stop and race strategy scheduler.
+/// Box Box: F1 pit-stop and race strategy scheduler.
 ///
 /// Conventions used throughout the core (see PRD sec. 3.1):
 ///   * every time is in SECONDS, stored as double;
 ///   * laps are 1-based in anything user-facing;
 ///   * tire age is 0-based, so a stint of L laps runs ages 0 .. L-1;
 ///   * floating-point values are NEVER compared with ==.
-namespace undercut {
+namespace boxbox {
 
 /// General-purpose comparison tolerance, in seconds.
 ///
@@ -52,6 +52,6 @@ inline bool isReachable(double t) noexcept {
     return std::isfinite(t);
 }
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_COMMON_HPP
+#endif  // BOXBOX_COMMON_HPP

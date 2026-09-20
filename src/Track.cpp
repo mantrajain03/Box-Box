@@ -1,10 +1,10 @@
-#include "undercut/Track.hpp"
+#include "boxbox/Track.hpp"
 
 #include <cmath>
 #include <stdexcept>
 #include <utility>
 
-namespace undercut {
+namespace boxbox {
 
 namespace {
 
@@ -55,4 +55,4 @@ void Track::setPitLoss(double seconds) {
     pitLoss_ = seconds;
 }
 
-}  // namespace undercut
+}  // namespace boxbox

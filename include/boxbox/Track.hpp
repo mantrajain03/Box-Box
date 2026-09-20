@@ -1,11 +1,11 @@
-#ifndef UNDERCUT_TRACK_HPP
-#define UNDERCUT_TRACK_HPP
+#ifndef BOXBOX_TRACK_HPP
+#define BOXBOX_TRACK_HPP
 
 #include <cstddef>
 #include <string>
 #include <vector>
 
-namespace undercut {
+namespace boxbox {
 
 /// One timing sector of a circuit.
 struct Sector {
@@ -59,6 +59,6 @@ private:
     double baseLapTime_ = 0.0;
 };
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_TRACK_HPP
+#endif  // BOXBOX_TRACK_HPP

@@ -1,13 +1,13 @@
-#ifndef UNDERCUT_DRIVER_HPP
-#define UNDERCUT_DRIVER_HPP
+#ifndef BOXBOX_DRIVER_HPP
+#define BOXBOX_DRIVER_HPP
 
 #include <cstddef>
 #include <string>
 #include <vector>
 
-#include "undercut/PitStrategy.hpp"
+#include "boxbox/PitStrategy.hpp"
 
-namespace undercut {
+namespace boxbox {
 
 class RaceSimulator;
 
@@ -93,6 +93,6 @@ private:
     double trafficLoss_ = 0.0;
 };
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_DRIVER_HPP
+#endif  // BOXBOX_DRIVER_HPP

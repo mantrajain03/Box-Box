@@ -1,11 +1,11 @@
-#include "undercut/TireCompound.hpp"
+#include "boxbox/TireCompound.hpp"
 
 #include <cctype>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
 
-namespace undercut {
+namespace boxbox {
 
 namespace {
 
@@ -82,4 +82,4 @@ std::vector<TireCompound> defaultCompounds() {
     return set;
 }
 
-}  // namespace undercut
+}  // namespace boxbox

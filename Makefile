@@ -1,5 +1,5 @@
 # ===========================================================================
-#  Undercut — F1 Pit-Stop & Race Strategy Scheduler
+#  Box Box — F1 Pit-Stop & Race Strategy Scheduler
 #
 #  The single build entry point for the project (NFR-6). There are no helper
 #  scripts in any language; everything this repository builds is a C++ program.
@@ -74,8 +74,8 @@ CORE_OBJ  := $(CORE_SRC:%.cpp=$(BUILD_DIR)/%.o)
 CLI_OBJ   := $(CLI_SRC:%.cpp=$(BUILD_DIR)/%.o)
 TEST_OBJ  := $(TEST_SRC:%.cpp=$(BUILD_DIR)/%.o)
 
-CLI_BIN   := $(BIN_DIR)/undercut$(EXE)
-TEST_BIN  := $(BIN_DIR)/undercut_tests$(EXE)
+CLI_BIN   := $(BIN_DIR)/boxbox$(EXE)
+TEST_BIN  := $(BIN_DIR)/boxbox_tests$(EXE)
 
 DEPS      := $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
 
@@ -119,7 +119,7 @@ clean:
 # shell treats a different subset of those characters as syntax.
 .PHONY: info
 info:
-	@echo Undercut build configuration
+	@echo Box Box build configuration
 	@echo   CXX           = $(CXX)
 	@echo   target triple = $(TARGET_TRIPLE)
 	@echo   exe suffix    = $(EXE)
@@ -132,7 +132,7 @@ info:
 
 .PHONY: help
 help:
-	@echo Undercut - F1 Pit-Stop and Race Strategy Scheduler
+	@echo Box Box - F1 Pit-Stop and Race Strategy Scheduler
 	@echo   make          Build the core library and the CLI. This is the default.
 	@echo   make test     Build and run the C++ assert harness
 	@echo   make run      Build then run the CLI. Pass options via ARGS=...

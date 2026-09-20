@@ -1,9 +1,9 @@
-#include "undercut/Driver.hpp"
+#include "boxbox/Driver.hpp"
 
 #include <stdexcept>
 #include <utility>
 
-namespace undercut {
+namespace boxbox {
 
 Driver::Driver(int number, std::string name, std::vector<Stint> plan)
     : number_(number), name_(std::move(name)), plan_(std::move(plan)) {
@@ -85,4 +85,4 @@ bool Driver::completeLap(double lapTime, double pitLoss, double trafficDelay) no
     return false;
 }
 
-}  // namespace undercut
+}  // namespace boxbox

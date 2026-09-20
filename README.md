@@ -1,8 +1,8 @@
-# Box-Box — Undercut
+# Box Box
 
 **An F1 pit-stop and race-strategy scheduler in C++17, using nothing but the standard library.**
 
-*"Box, box"* is the radio call that brings a car into the pits. Undercut answers the
+*"Box, box"* is the radio call that brings a car into the pits. Box Box answers the
 question behind that call: **how many stops, on which laps, on which tires?** It finds
 the fastest plan by dynamic programming, then replays the race lap by lap to prove the
 plan holds up.
@@ -34,7 +34,7 @@ You need a C++17 compiler and GNU Make — nothing else. Development uses GCC 13
 MSYS2 (UCRT64) on Windows, where make is called `mingw32-make`:
 
 ```
-mingw32-make                                  # core library + CLI  ->  bin/undercut.exe
+mingw32-make                                  # core library + CLI  ->  bin/boxbox.exe
 mingw32-make test                             # build and run the test harness
 mingw32-make run ARGS="--laps 50 --rivals"    # build, then run the CLI
 mingw32-make clean                            # remove build/ and bin/
@@ -63,14 +63,14 @@ the CLI; `make test` builds only the core and the test harness.
 | `--pass-margin SECONDS` | Lap-time advantage needed to pass | 1.0 |
 
 `--rivals`, `--lap-log` and the overtaking flags all imply `--simulate`; `--min-gap` and
-`--pass-margin` also imply `--overtake`. `undercut --help` prints the full text.
+`--pass-margin` also imply `--overtake`. `boxbox --help` prints the full text.
 
 Exit status: `0` success · `1` bad usage · `2` no feasible strategy · `3` loop-closure
 check failed.
 
 ### The default race
 
-`bin/undercut` plans a 50-lap race with a 22 s pit loss on the default compounds:
+`bin/boxbox` plans a 50-lap race with a 22 s pit loss on the default compounds:
 
 ```
 Optimal strategy
@@ -92,7 +92,7 @@ Optimal strategy
 A 4-lap race is small enough to solve on paper:
 
 ```
-bin/undercut --laps 4 --pit-loss 5 --sector 10 --compound A:0:1:3 --compound B:2:0:4 --show-table --simulate
+bin/boxbox --laps 4 --pit-loss 5 --sector 10 --compound A:0:1:3 --compound B:2:0:4 --show-table --simulate
 ```
 
 Compound A costs nothing extra on fresh tires but loses 1 s per lap of age and lasts at
@@ -131,7 +131,7 @@ Loop closure check   FR-8
 
 ### Racing rivals, with and without overtaking
 
-`bin/undercut --laps 50 --rivals` adds one car per compound. On their own, the cars never
+`bin/boxbox --laps 50 --rivals` adds one car per compound. On their own, the cars never
 interact, and the optimal plan wins. (ALL-SOFT happens to run the same three-stint plan,
 so it ties exactly and the lower car number takes P1.)
 
@@ -273,7 +273,7 @@ counts.
 ## Project layout
 
 ```
-include/undercut/     public headers: Common, Track, TireCompound, PitStrategy,
+include/boxbox/       public headers: Common, Track, TireCompound, PitStrategy,
                       Driver, Leaderboard, RaceSimulator
 src/                  core library: standard library only, no knowledge of any frontend
 cli/main.cpp          command-line frontend: parsing and printing, no algorithms

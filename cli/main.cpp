@@ -1,4 +1,4 @@
-// Undercut: command-line frontend.
+// Box Box: command-line frontend.
 //
 // This file is a thin frontend over the core library: it parses arguments,
 // constructs core objects, calls into them and formats the result. It contains
@@ -18,24 +18,24 @@
 #include <string>
 #include <vector>
 
-#include "undercut/Common.hpp"
-#include "undercut/Driver.hpp"
-#include "undercut/PitStrategy.hpp"
-#include "undercut/RaceSimulator.hpp"
-#include "undercut/TireCompound.hpp"
-#include "undercut/Track.hpp"
+#include "boxbox/Common.hpp"
+#include "boxbox/Driver.hpp"
+#include "boxbox/PitStrategy.hpp"
+#include "boxbox/RaceSimulator.hpp"
+#include "boxbox/TireCompound.hpp"
+#include "boxbox/Track.hpp"
 
 namespace {
 
-using undercut::Driver;
-using undercut::OvertakeRule;
-using undercut::PitStrategy;
-using undercut::RaceSimulator;
-using undercut::Standing;
-using undercut::StrategyResult;
-using undercut::Stint;
-using undercut::TireCompound;
-using undercut::Track;
+using boxbox::Driver;
+using boxbox::OvertakeRule;
+using boxbox::PitStrategy;
+using boxbox::RaceSimulator;
+using boxbox::Standing;
+using boxbox::StrategyResult;
+using boxbox::Stint;
+using boxbox::TireCompound;
+using boxbox::Track;
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 1;
@@ -181,9 +181,9 @@ std::string formatDelta(double value) {
 void printUsage(std::ostream& out) {
     const OvertakeRule defaults;  // FR-9 defaults come from the core, not from here
     out <<
-        "Undercut - F1 Pit-Stop & Race Strategy Scheduler\n"
+        "Box Box - F1 Pit-Stop & Race Strategy Scheduler\n"
         "\n"
-        "Usage: undercut [options]\n"
+        "Usage: boxbox [options]\n"
         "\n"
         "Race setup:\n"
         "  --laps N                Race distance in laps. Default 50.\n"
@@ -229,10 +229,10 @@ void printUsage(std::ostream& out) {
         "  0 success   1 bad usage   2 no feasible strategy   3 FR-8 check failed\n"
         "\n"
         "Examples:\n"
-        "  undercut --laps 50 --pit-loss 22.0\n"
-        "  undercut --laps 50 --rivals --lap-log 10\n"
-        "  undercut --laps 50 --rivals --overtake --lap-log 10\n"
-        "  undercut --laps 4 --pit-loss 5 --sector 10 \\\n"
+        "  boxbox --laps 50 --pit-loss 22.0\n"
+        "  boxbox --laps 50 --rivals --lap-log 10\n"
+        "  boxbox --laps 50 --rivals --overtake --lap-log 10\n"
+        "  boxbox --laps 4 --pit-loss 5 --sector 10 \\\n"
         "           --compound A:0:1:3 --compound B:2:0:4 --show-table\n";
 }
 
@@ -403,7 +403,7 @@ void printStandings(const RaceSimulator& simulator, const std::string& heading) 
 /// Returns true on pass. The tolerance is read from the core, never widened here.
 bool printClosureCheck(const StrategyResult& plan, const Driver& driver) {
     const double difference = std::fabs(driver.cumulativeTime() - plan.totalTime);
-    const bool passed = difference <= undercut::kClosureTolerance;
+    const bool passed = difference <= boxbox::kClosureTolerance;
 
     const std::string simulatedLabel =
         "Driver " + std::to_string(driver.number()) + " simulated total time";
@@ -423,7 +423,7 @@ bool printClosureCheck(const StrategyResult& plan, const Driver& driver) {
               << std::right << std::setw(kValueWidth) << formatDelta(difference) << " s\n";
     std::cout << "  " << std::left << std::setw(kLabelWidth) << "Tolerance kClosureTolerance"
               << std::right << std::setw(kValueWidth)
-              << formatDelta(undercut::kClosureTolerance) << " s\n";
+              << formatDelta(boxbox::kClosureTolerance) << " s\n";
     std::cout << "  " << std::left << std::setw(kLabelWidth) << "RESULT" << std::right
               << std::setw(kValueWidth) << (passed ? "PASS" : "FAIL") << '\n';
 
@@ -440,7 +440,7 @@ struct Options {
     std::string trackName = "Generic Circuit";
     int laps = 50;
     double pitLoss = 22.0;
-    std::vector<undercut::Sector> sectors;
+    std::vector<boxbox::Sector> sectors;
     std::vector<TireCompound> compounds;
     bool sectorsOverridden = false;
     bool compoundsOverridden = false;
@@ -482,7 +482,7 @@ Options parseArguments(int argc, char** argv) {
                 options.sectors.clear();
                 options.sectorsOverridden = true;
             }
-            undercut::Sector sector;
+            boxbox::Sector sector;
             const std::vector<std::string> parts = split(spec, ':');
             if (parts.size() == 1U) {
                 sector.name = "S" + std::to_string(options.sectors.size() + 1U);
@@ -546,7 +546,7 @@ int main(int argc, char** argv) {
     try {
         options = parseArguments(argc, argv);
     } catch (const std::exception& error) {
-        std::cerr << "undercut: " << error.what() << '\n';
+        std::cerr << "boxbox: " << error.what() << '\n';
         return kExitUsage;
     }
 
@@ -559,7 +559,7 @@ int main(int argc, char** argv) {
         Track track(options.trackName, options.laps, options.pitLoss);
 
         if (options.sectorsOverridden) {
-            for (const undercut::Sector& sector : options.sectors) {
+            for (const boxbox::Sector& sector : options.sectors) {
                 track.addSector(sector.name, sector.baseTime);
             }
         } else {
@@ -569,7 +569,7 @@ int main(int argc, char** argv) {
         }
 
         std::vector<TireCompound> compounds =
-            options.compoundsOverridden ? options.compounds : undercut::defaultCompounds();
+            options.compoundsOverridden ? options.compounds : boxbox::defaultCompounds();
 
         const PitStrategy strategy(track, compounds);
 
@@ -579,7 +579,7 @@ int main(int argc, char** argv) {
         simulator.setOvertakeRule(options.overtake);
 
         std::cout << "============================================================\n"
-                  << " UNDERCUT - F1 Pit-Stop & Race Strategy Scheduler\n"
+                  << " BOX BOX - F1 Pit-Stop & Race Strategy Scheduler\n"
                   << "============================================================\n\n";
 
         printSetup(strategy.track(), strategy.compounds(), simulator.overtakeRule());
@@ -591,7 +591,7 @@ int main(int argc, char** argv) {
         const StrategyResult result = strategy.optimize();
 
         if (!result.feasible) {
-            std::cerr << "undercut: no feasible strategy covers " << track.totalLaps()
+            std::cerr << "boxbox: no feasible strategy covers " << track.totalLaps()
                       << " laps with this compound set\n";
             return kExitInfeasible;
         }
@@ -644,7 +644,7 @@ int main(int argc, char** argv) {
             }
         }
     } catch (const std::exception& error) {
-        std::cerr << "undercut: " << error.what() << '\n';
+        std::cerr << "boxbox: " << error.what() << '\n';
         return kExitUsage;
     }
 

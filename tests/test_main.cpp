@@ -1,4 +1,4 @@
-// Undercut: assert-based test harness (Phase 5).
+// Box Box: assert-based test harness (Phase 5).
 //
 // Hand-written on purpose. A test framework would be an external dependency
 // and would break NFR-1, so this file provides its own CHECK macros, its own
@@ -22,28 +22,28 @@
 #include <string>
 #include <vector>
 
-#include "undercut/Common.hpp"
-#include "undercut/Driver.hpp"
-#include "undercut/Leaderboard.hpp"
-#include "undercut/PitStrategy.hpp"
-#include "undercut/RaceSimulator.hpp"
-#include "undercut/TireCompound.hpp"
-#include "undercut/Track.hpp"
+#include "boxbox/Common.hpp"
+#include "boxbox/Driver.hpp"
+#include "boxbox/Leaderboard.hpp"
+#include "boxbox/PitStrategy.hpp"
+#include "boxbox/RaceSimulator.hpp"
+#include "boxbox/TireCompound.hpp"
+#include "boxbox/Track.hpp"
 
 namespace {
 
-using undercut::Driver;
-using undercut::Leaderboard;
-using undercut::LeaderboardEntry;
-using undercut::OvertakeRule;
-using undercut::PitStrategy;
-using undercut::PlannedStint;
-using undercut::RaceSimulator;
-using undercut::Standing;
-using undercut::StrategyResult;
-using undercut::Stint;
-using undercut::TireCompound;
-using undercut::Track;
+using boxbox::Driver;
+using boxbox::Leaderboard;
+using boxbox::LeaderboardEntry;
+using boxbox::OvertakeRule;
+using boxbox::PitStrategy;
+using boxbox::PlannedStint;
+using boxbox::RaceSimulator;
+using boxbox::Standing;
+using boxbox::StrategyResult;
+using boxbox::Stint;
+using boxbox::TireCompound;
+using boxbox::Track;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -219,13 +219,13 @@ double bruteForceBest(const PitStrategy& strategy, int lapsLeft, bool isFirstSti
     }
 
     const double pitLoss = strategy.track().pitLoss();
-    double best = undercut::kUnreachable;
+    double best = boxbox::kUnreachable;
 
     for (std::size_t c = 0; c < strategy.compounds().size(); ++c) {
         const int longest = std::min(lapsLeft, strategy.compounds()[c].maxStintLaps());
         for (int length = 1; length <= longest; ++length) {
             const double rest = bruteForceBest(strategy, lapsLeft - length, false);
-            if (!undercut::isReachable(rest)) {
+            if (!boxbox::isReachable(rest)) {
                 continue;
             }
             const double candidate =
@@ -247,19 +247,19 @@ void testTrack() {
 
     const Track three = makeTrack(50, 22.0, {28.4, 31.2, 30.4});
     CHECK(three.sectorCount() == 3U);
-    CHECK_NEAR(three.baseLapTime(), 90.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(three.baseLapTime(), 90.0, boxbox::kTimeEpsilon);
     CHECK(three.totalLaps() == 50);
-    CHECK_NEAR(three.pitLoss(), 22.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(three.pitLoss(), 22.0, boxbox::kTimeEpsilon);
 
     // Single-sector track: the Phase 5 edge case.
     const Track single = makeTrack(10, 5.0, {95.5});
     CHECK(single.sectorCount() == 1U);
-    CHECK_NEAR(single.baseLapTime(), 95.5, undercut::kTimeEpsilon);
+    CHECK_NEAR(single.baseLapTime(), 95.5, boxbox::kTimeEpsilon);
 
     // No sectors at all is legal and contributes nothing to a lap.
     const Track bare = makeTrack(10, 5.0, {});
     CHECK(bare.sectorCount() == 0U);
-    CHECK_NEAR(bare.baseLapTime(), 0.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(bare.baseLapTime(), 0.0, boxbox::kTimeEpsilon);
 
     // A zero-lap race is a legal Track, not an error.
     const Track empty = makeTrack(0, 22.0, {90.0});
@@ -269,7 +269,7 @@ void testTrack() {
     mutableTrack.setTotalLaps(20);
     mutableTrack.setPitLoss(17.5);
     CHECK(mutableTrack.totalLaps() == 20);
-    CHECK_NEAR(mutableTrack.pitLoss(), 17.5, undercut::kTimeEpsilon);
+    CHECK_NEAR(mutableTrack.pitLoss(), 17.5, boxbox::kTimeEpsilon);
 
     CHECK_THROWS(Track("Bad", -1, 20.0));
     CHECK_THROWS(Track("Bad", 10, -1.0));
@@ -284,20 +284,20 @@ void testTireCompound() {
     // Purely linear: no cliff configured.
     const TireCompound linear("LINEAR", -0.5, 0.1, 20);
     CHECK(!linear.hasCliff());
-    CHECK_NEAR(linear.lapDelta(0), -0.5, undercut::kTimeEpsilon);
-    CHECK_NEAR(linear.lapDelta(1), -0.4, undercut::kTimeEpsilon);
-    CHECK_NEAR(linear.lapDelta(10), 0.5, undercut::kTimeEpsilon);
+    CHECK_NEAR(linear.lapDelta(0), -0.5, boxbox::kTimeEpsilon);
+    CHECK_NEAR(linear.lapDelta(1), -0.4, boxbox::kTimeEpsilon);
+    CHECK_NEAR(linear.lapDelta(10), 0.5, boxbox::kTimeEpsilon);
 
     // Negative ages clamp to a fresh set rather than running the model backwards.
-    CHECK_NEAR(linear.lapDelta(-5), linear.lapDelta(0), undercut::kTimeEpsilon);
+    CHECK_NEAR(linear.lapDelta(-5), linear.lapDelta(0), boxbox::kTimeEpsilon);
 
     // Cliff at age 5, costing an extra 0.2 s per lap beyond it.
     const TireCompound cliffed("CLIFF", 0.0, 0.1, 20, 5, 0.2);
     CHECK(cliffed.hasCliff());
-    CHECK_NEAR(cliffed.lapDelta(4), 0.4, undercut::kTimeEpsilon);   // below the cliff
-    CHECK_NEAR(cliffed.lapDelta(5), 0.5, undercut::kTimeEpsilon);   // exactly at it
-    CHECK_NEAR(cliffed.lapDelta(6), 0.8, undercut::kTimeEpsilon);   // 0.6 + 0.2*1
-    CHECK_NEAR(cliffed.lapDelta(8), 1.4, undercut::kTimeEpsilon);   // 0.8 + 0.2*3
+    CHECK_NEAR(cliffed.lapDelta(4), 0.4, boxbox::kTimeEpsilon);   // below the cliff
+    CHECK_NEAR(cliffed.lapDelta(5), 0.5, boxbox::kTimeEpsilon);   // exactly at it
+    CHECK_NEAR(cliffed.lapDelta(6), 0.8, boxbox::kTimeEpsilon);   // 0.6 + 0.2*1
+    CHECK_NEAR(cliffed.lapDelta(8), 1.4, boxbox::kTimeEpsilon);   // 0.8 + 0.2*3
 
     CHECK(linear.code() == 'L');
     CHECK(TireCompound("soft", 0.0, 0.0, 1).code() == 'S');
@@ -307,7 +307,7 @@ void testTireCompound() {
     CHECK_THROWS(TireCompound("Bad", 0.0, 0.1, 10, 5, -0.2));
 
     // The default set must be ordered softest to hardest in every respect.
-    const std::vector<TireCompound> defaults = undercut::defaultCompounds();
+    const std::vector<TireCompound> defaults = boxbox::defaultCompounds();
     CHECK(defaults.size() == 3U);
     for (std::size_t i = 1; i < defaults.size(); ++i) {
         CHECK_MSG(defaults[i].basePace() > defaults[i - 1U].basePace(),
@@ -325,19 +325,19 @@ void testStintCostTable() {
     const PitStrategy strategy(makeTrack(4, 5.0, {10.0}), handCheckCompounds());
 
     // A of length L: 10L + sum of ages 0..L-1.
-    CHECK_NEAR(strategy.stintCost(0, 1), 10.0, undercut::kTimeEpsilon);
-    CHECK_NEAR(strategy.stintCost(0, 2), 21.0, undercut::kTimeEpsilon);
-    CHECK_NEAR(strategy.stintCost(0, 3), 33.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(strategy.stintCost(0, 1), 10.0, boxbox::kTimeEpsilon);
+    CHECK_NEAR(strategy.stintCost(0, 2), 21.0, boxbox::kTimeEpsilon);
+    CHECK_NEAR(strategy.stintCost(0, 3), 33.0, boxbox::kTimeEpsilon);
 
     // B of length L: 10L + 2L.
-    CHECK_NEAR(strategy.stintCost(1, 1), 12.0, undercut::kTimeEpsilon);
-    CHECK_NEAR(strategy.stintCost(1, 4), 48.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(strategy.stintCost(1, 1), 12.0, boxbox::kTimeEpsilon);
+    CHECK_NEAR(strategy.stintCost(1, 4), 48.0, boxbox::kTimeEpsilon);
 
     // Zero laps costs nothing; past maxStintLaps is unreachable, not expensive.
-    CHECK_NEAR(strategy.stintCost(0, 0), 0.0, undercut::kTimeEpsilon);
-    CHECK(!undercut::isReachable(strategy.stintCost(0, 4)));
-    CHECK(!undercut::isReachable(strategy.stintCost(1, 5)));
-    CHECK(!undercut::isReachable(strategy.stintCost(99, 1)));
+    CHECK_NEAR(strategy.stintCost(0, 0), 0.0, boxbox::kTimeEpsilon);
+    CHECK(!boxbox::isReachable(strategy.stintCost(0, 4)));
+    CHECK(!boxbox::isReachable(strategy.stintCost(1, 5)));
+    CHECK(!boxbox::isReachable(strategy.stintCost(99, 1)));
 
     CHECK(strategy.maxStintLaps() == 4);
 
@@ -348,11 +348,11 @@ void testStintCostTable() {
         double runningDelta = 0.0;
         for (int length = 1; length <= compounds[c].maxStintLaps(); ++length) {
             runningDelta += compounds[c].lapDelta(length - 1);
-            CHECK_NEAR(strategy.stintDelta(c, length), runningDelta, undercut::kTimeEpsilon);
+            CHECK_NEAR(strategy.stintDelta(c, length), runningDelta, boxbox::kTimeEpsilon);
             CHECK_NEAR(strategy.stintCost(c, length),
                        static_cast<double>(length) * strategy.track().baseLapTime() +
                            runningDelta,
-                       undercut::kTimeEpsilon);
+                       boxbox::kTimeEpsilon);
         }
     }
 
@@ -368,10 +368,10 @@ void testOptimizerAgainstHandComputation() {
     // Worked by hand in PRD sec. 7:
     //   dp[1]=10 (A x1)  dp[2]=21 (A x2)  dp[3]=33 (A x3)  dp[4]=47 (A x2 + A x2)
     CHECK(result.feasible);
-    CHECK_NEAR(result.dpValue, 47.0, undercut::kTimeEpsilon);
-    CHECK_NEAR(result.totalTime, 47.0, undercut::kTimeEpsilon);
-    CHECK_NEAR(result.greenTime, 42.0, undercut::kTimeEpsilon);
-    CHECK_NEAR(result.pitTime, 5.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(result.dpValue, 47.0, boxbox::kTimeEpsilon);
+    CHECK_NEAR(result.totalTime, 47.0, boxbox::kTimeEpsilon);
+    CHECK_NEAR(result.greenTime, 42.0, boxbox::kTimeEpsilon);
+    CHECK_NEAR(result.pitTime, 5.0, boxbox::kTimeEpsilon);
 
     CHECK(result.stints.size() == 2U);
     CHECK(result.stopCount() == 1);
@@ -391,7 +391,7 @@ void testOptimizerAgainstHandComputation() {
 
     // dp[N] and the total rebuilt from the backtracked plan are computed by
     // different arithmetic and must still agree.
-    CHECK_NEAR(result.totalTime, result.dpValue, undercut::kClosureTolerance);
+    CHECK_NEAR(result.totalTime, result.dpValue, boxbox::kClosureTolerance);
 }
 
 void testOptimizerAgainstBruteForce() {
@@ -423,10 +423,10 @@ void testOptimizerAgainstBruteForce() {
         std::ostringstream detail;
         detail << "trial " << trial << "  laps " << laps << "  compounds " << compoundCount;
 
-        CHECK_MSG(result.feasible == undercut::isReachable(reference), detail.str());
-        if (result.feasible && undercut::isReachable(reference)) {
-            CHECK_NEAR(result.dpValue, reference, undercut::kClosureTolerance);
-            CHECK_NEAR(result.totalTime, reference, undercut::kClosureTolerance);
+        CHECK_MSG(result.feasible == boxbox::isReachable(reference), detail.str());
+        if (result.feasible && boxbox::isReachable(reference)) {
+            CHECK_NEAR(result.dpValue, reference, boxbox::kClosureTolerance);
+            CHECK_NEAR(result.totalTime, reference, boxbox::kClosureTolerance);
             CHECK_MSG(result.plannedLaps() == laps, detail.str());
         }
     }
@@ -441,7 +441,7 @@ void testStintLengthsCoverRace() {
         const int laps = random.nextInt(1, 80);
         const PitStrategy strategy(
             makeTrack(laps, random.nextDouble(0.0, 40.0), {random.nextDouble(60.0, 110.0)}),
-            undercut::defaultCompounds());
+            boxbox::defaultCompounds());
 
         const StrategyResult result = strategy.optimize();
 
@@ -472,7 +472,7 @@ void testStintLengthsCoverRace() {
 void testZeroPitLossFavoursShortStints() {
     beginSection("FR-1: zero pit loss favours many short stints on the softest tire");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
 
     // "Softest" here means quickest on a fresh set, which is what a free stop
     // makes optimal: pit every lap and always run age 0.
@@ -502,16 +502,16 @@ void testZeroPitLossFavoursShortStints() {
     CHECK_MSG(allSoftest, "every stint should be on the quickest fresh compound");
     CHECK_MSG(allSingleLap, "every stint should be a single lap");
 
-    CHECK_NEAR(result.pitTime, 0.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(result.pitTime, 0.0, boxbox::kTimeEpsilon);
     CHECK_NEAR(result.totalTime,
                static_cast<double>(laps) * (90.0 + compounds[softest].lapDelta(0)),
-               undercut::kClosureTolerance);
+               boxbox::kClosureTolerance);
 }
 
 void testHighPitLossCollapsesStops() {
     beginSection("FR-1: a huge pit loss collapses to the fewest legal stops");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
 
     int longestStint = 0;
     for (const TireCompound& compound : compounds) {
@@ -540,7 +540,7 @@ void testHighPitLossCollapsesStops() {
         CHECK(result.feasible);
         CHECK_MSG(result.stopCount() == 0, "a race that fits one stint should not stop");
         CHECK(result.stints.size() == 1U);
-        CHECK_NEAR(result.pitTime, 0.0, undercut::kTimeEpsilon);
+        CHECK_NEAR(result.pitTime, 0.0, boxbox::kTimeEpsilon);
     }
 }
 
@@ -555,7 +555,7 @@ void testLoopClosure() {
         const double baseLap = random.nextDouble(55.0, 115.0);
 
         const Track track = makeTrack(laps, pitLoss, {baseLap});
-        const PitStrategy strategy(track, undercut::defaultCompounds());
+        const PitStrategy strategy(track, boxbox::defaultCompounds());
         const StrategyResult plan = strategy.optimize();
 
         std::ostringstream detail;
@@ -566,7 +566,7 @@ void testLoopClosure() {
             continue;
         }
 
-        RaceSimulator simulator(track, undercut::defaultCompounds());
+        RaceSimulator simulator(track, boxbox::defaultCompounds());
         simulator.addDriver(1, "OPTIMAL", plan);  // FR-7: no hand-written stop laps
         simulator.runToFinish();
 
@@ -578,14 +578,14 @@ void testLoopClosure() {
 
         // The check the whole project exists to pass. The tolerance comes from
         // the core and is never widened here.
-        CHECK_NEAR(driver.cumulativeTime(), plan.totalTime, undercut::kClosureTolerance);
+        CHECK_NEAR(driver.cumulativeTime(), plan.totalTime, boxbox::kClosureTolerance);
     }
 }
 
 void testSimulatorEdgeCases() {
     beginSection("Simulator edge cases");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
 
     // Zero laps: an empty plan is the only legal one, and it closes at 0.0.
     {
@@ -595,7 +595,7 @@ void testSimulatorEdgeCases() {
 
         CHECK(plan.feasible);
         CHECK(plan.stints.empty());
-        CHECK_NEAR(plan.totalTime, 0.0, undercut::kTimeEpsilon);
+        CHECK_NEAR(plan.totalTime, 0.0, boxbox::kTimeEpsilon);
 
         RaceSimulator simulator(track, compounds);
         simulator.addDriver(1, "NOBODY", plan);
@@ -604,7 +604,7 @@ void testSimulatorEdgeCases() {
 
         simulator.runToFinish();
         CHECK_NEAR(simulator.drivers().front().cumulativeTime(), 0.0,
-                   undercut::kClosureTolerance);
+                   boxbox::kClosureTolerance);
     }
 
     // One lap: one stint, no stop.
@@ -623,7 +623,7 @@ void testSimulatorEdgeCases() {
         const Driver& driver = simulator.drivers().front();
         CHECK(driver.lapsCompleted() == 1);
         CHECK(driver.stopsMade() == 0);
-        CHECK_NEAR(driver.cumulativeTime(), plan.totalTime, undercut::kClosureTolerance);
+        CHECK_NEAR(driver.cumulativeTime(), plan.totalTime, boxbox::kClosureTolerance);
     }
 
     // A driver with no planned stops over a long race.
@@ -646,7 +646,7 @@ void testSimulatorEdgeCases() {
         const Driver& driver = simulator.drivers().front();
         CHECK(driver.stopsMade() == 0);
         CHECK(driver.tireAge() == laps);
-        CHECK_NEAR(driver.cumulativeTime(), costed.totalTime, undercut::kClosureTolerance);
+        CHECK_NEAR(driver.cumulativeTime(), costed.totalTime, boxbox::kClosureTolerance);
     }
 
     // A stop immediately before the final lap: the last stint is one lap long,
@@ -666,7 +666,7 @@ void testSimulatorEdgeCases() {
         if (costed.pitLaps.size() == 1U) {
             CHECK_MSG(costed.pitLaps[0] == laps - 1, "the only stop ends lap 9, not lap 10");
         }
-        CHECK_NEAR(costed.pitTime, 20.0, undercut::kTimeEpsilon);
+        CHECK_NEAR(costed.pitTime, 20.0, boxbox::kTimeEpsilon);
 
         RaceSimulator simulator(track, compounds);
         simulator.addDriver(1, "LATE-STOP", costed);
@@ -675,7 +675,7 @@ void testSimulatorEdgeCases() {
         const Driver& driver = simulator.drivers().front();
         CHECK_MSG(driver.stopsMade() == 1, "exactly one pit loss, none after the flag");
         CHECK(driver.tireAge() == 1);
-        CHECK_NEAR(driver.cumulativeTime(), costed.totalTime, undercut::kClosureTolerance);
+        CHECK_NEAR(driver.cumulativeTime(), costed.totalTime, boxbox::kClosureTolerance);
     }
 
     // A zero-lap stint is not a plan: rejected at both entry points. This is
@@ -716,14 +716,14 @@ void testSimulatorEdgeCases() {
         simulator.runToFinish();
 
         CHECK_NEAR(simulator.drivers().front().cumulativeTime(), plan.totalTime,
-                   undercut::kClosureTolerance);
+                   boxbox::kClosureTolerance);
     }
 }
 
 void testCompoundSwitching() {
     beginSection("FR-5 / FR-6: compound switching and lap-time fidelity");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
     const int laps = 20;
     const Track track = makeTrack(laps, 20.0, {90.0});
 
@@ -742,7 +742,7 @@ void testCompoundSwitching() {
     for (int lap = 1; lap <= 10; ++lap) {
         const Driver& driver = simulator.drivers().front();
         const double expected = 90.0 + compounds[0].lapDelta(lap - 1);
-        CHECK_NEAR(simulator.lapTimeFor(driver), expected, undercut::kTimeEpsilon);
+        CHECK_NEAR(simulator.lapTimeFor(driver), expected, boxbox::kTimeEpsilon);
         CHECK(driver.currentCompoundName() == "SOFT");
         CHECK(driver.tireAge() == lap - 1);
         simulator.advanceLap();
@@ -760,13 +760,13 @@ void testCompoundSwitching() {
     for (int lap = 1; lap <= 10; ++lap) {
         const Driver& driver = simulator.drivers().front();
         const double expected = 90.0 + compounds[2].lapDelta(lap - 1);
-        CHECK_NEAR(simulator.lapTimeFor(driver), expected, undercut::kTimeEpsilon);
+        CHECK_NEAR(simulator.lapTimeFor(driver), expected, boxbox::kTimeEpsilon);
         simulator.advanceLap();
     }
 
     CHECK(simulator.finished());
     CHECK_NEAR(simulator.drivers().front().cumulativeTime(), costed.totalTime,
-               undercut::kClosureTolerance);
+               boxbox::kClosureTolerance);
 
     // FR-5: two cars on different compounds over identical laps must diverge.
     {
@@ -778,7 +778,7 @@ void testCompoundSwitching() {
         const double softTime = race.drivers()[0].cumulativeTime();
         const double hardTime = race.drivers()[1].cumulativeTime();
 
-        CHECK_MSG(!undercut::nearlyEqual(softTime, hardTime, 1.0e-3),
+        CHECK_MSG(!boxbox::nearlyEqual(softTime, hardTime, 1.0e-3),
                   "different compounds must produce different race times");
         CHECK(race.drivers()[0].lapsCompleted() == race.drivers()[1].lapsCompleted());
     }
@@ -787,7 +787,7 @@ void testCompoundSwitching() {
 void testEvaluatePlan() {
     beginSection("evaluatePlan and singleCompoundPlan");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
     const int laps = 50;
     const PitStrategy strategy(makeTrack(laps, 22.0, {90.0}), compounds);
 
@@ -800,15 +800,15 @@ void testEvaluatePlan() {
     const StrategyResult recosted = strategy.evaluatePlan(asPlanned);
 
     CHECK(recosted.feasible);
-    CHECK_NEAR(recosted.totalTime, best.totalTime, undercut::kTimeEpsilon);
-    CHECK(!undercut::isReachable(recosted.dpValue));  // no DP ran for this one
+    CHECK_NEAR(recosted.totalTime, best.totalTime, boxbox::kTimeEpsilon);
+    CHECK(!boxbox::isReachable(recosted.dpValue));  // no DP ran for this one
 
     // No hand-entered plan may beat the optimum.
     for (std::size_t c = 0; c < compounds.size(); ++c) {
         const StrategyResult reference = strategy.singleCompoundPlan(c);
         CHECK(reference.feasible);
         CHECK(reference.plannedLaps() == laps);
-        CHECK_MSG(reference.totalTime >= best.totalTime - undercut::kClosureTolerance,
+        CHECK_MSG(reference.totalTime >= best.totalTime - boxbox::kClosureTolerance,
                   "the DP optimum must not be beaten by a single-compound plan");
     }
 
@@ -950,7 +950,7 @@ void testLeaderboard() {
 void testStandings() {
     beginSection("Standings through the leaderboard");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
     const int laps = 30;
     const Track track = makeTrack(laps, 22.0, {90.0});
     const PitStrategy strategy(track, compounds);
@@ -973,11 +973,11 @@ void testStandings() {
             const double previous = simulator.drivers()[table[i - 1U].driverIndex].cumulativeTime();
             const double current = simulator.drivers()[table[i].driverIndex].cumulativeTime();
             CHECK_MSG(current >= previous, "standings must be ordered by race time");
-            CHECK_MSG(table[i].gapToLeader >= table[i - 1U].gapToLeader - undercut::kTimeEpsilon,
+            CHECK_MSG(table[i].gapToLeader >= table[i - 1U].gapToLeader - boxbox::kTimeEpsilon,
                       "gaps must not shrink down the order");
         }
     }
-    CHECK_NEAR(table.front().gapToLeader, 0.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(table.front().gapToLeader, 0.0, boxbox::kTimeEpsilon);
 
     // The optimizer's car must win a race it was optimized for.
     CHECK_MSG(simulator.drivers()[table.front().driverIndex].number() == 1,
@@ -999,7 +999,7 @@ void testStandings() {
 void testDeterminism() {
     beginSection("NFR-5: determinism");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
     const Track track = makeTrack(57, 21.5, {29.1, 30.7, 31.4});
     const PitStrategy strategy(track, compounds);
 
@@ -1057,17 +1057,17 @@ void testDeterminism() {
 void testToleranceHelpers() {
     beginSection("Common: float comparison helpers");
 
-    CHECK(undercut::nearlyEqual(1.0, 1.0 + undercut::kTimeEpsilon / 2.0));
-    CHECK(!undercut::nearlyEqual(1.0, 1.0 + undercut::kTimeEpsilon * 100.0));
+    CHECK(boxbox::nearlyEqual(1.0, 1.0 + boxbox::kTimeEpsilon / 2.0));
+    CHECK(!boxbox::nearlyEqual(1.0, 1.0 + boxbox::kTimeEpsilon * 100.0));
 
-    CHECK(undercut::definitelyLess(1.0, 2.0));
-    CHECK(!undercut::definitelyLess(2.0, 1.0));
-    CHECK_MSG(!undercut::definitelyLess(1.0, 1.0 + undercut::kTimeEpsilon / 2.0),
+    CHECK(boxbox::definitelyLess(1.0, 2.0));
+    CHECK(!boxbox::definitelyLess(2.0, 1.0));
+    CHECK_MSG(!boxbox::definitelyLess(1.0, 1.0 + boxbox::kTimeEpsilon / 2.0),
               "a tie within tolerance is not an improvement; this is the DP tie-break");
 
-    CHECK(undercut::isReachable(0.0));
-    CHECK(!undercut::isReachable(undercut::kUnreachable));
-    CHECK(undercut::kClosureTolerance > undercut::kTimeEpsilon);
+    CHECK(boxbox::isReachable(0.0));
+    CHECK(!boxbox::isReachable(boxbox::kUnreachable));
+    CHECK(boxbox::kClosureTolerance > boxbox::kTimeEpsilon);
 }
 
 void testStopsOutsideTheRace() {
@@ -1077,7 +1077,7 @@ void testStopsOutsideTheRace() {
     // end of the final lap is a zero-lap closing stint. Both plans below still
     // cover the 10-lap race exactly, so the lap-total check passes and ONLY
     // the zero-lap guard stands between each plan and a phantom pit stop.
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
     const int laps = 10;
     const Track track = makeTrack(laps, 20.0, {90.0});
     const PitStrategy strategy(track, compounds);
@@ -1114,11 +1114,11 @@ void testStopsOutsideTheRace() {
 void testOvertakeRuleSettings() {
     beginSection("FR-9: rule settings and validation");
 
-    RaceSimulator simulator(makeTrack(10, 20.0, {90.0}), undercut::defaultCompounds());
+    RaceSimulator simulator(makeTrack(10, 20.0, {90.0}), boxbox::defaultCompounds());
 
     CHECK_MSG(!simulator.overtakeRule().enabled, "overtaking must be off by default");
-    CHECK_NEAR(simulator.overtakeRule().minGap, 0.5, undercut::kTimeEpsilon);
-    CHECK_NEAR(simulator.overtakeRule().passMargin, 1.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().minGap, 0.5, boxbox::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().passMargin, 1.0, boxbox::kTimeEpsilon);
 
     OvertakeRule good;
     good.enabled = true;
@@ -1126,13 +1126,13 @@ void testOvertakeRuleSettings() {
     good.passMargin = 0.0;  // legal: any quicker car gets by
     simulator.setOvertakeRule(good);
     CHECK(simulator.overtakeRule().enabled);
-    CHECK_NEAR(simulator.overtakeRule().minGap, 0.8, undercut::kTimeEpsilon);
-    CHECK_NEAR(simulator.overtakeRule().passMargin, 0.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().minGap, 0.8, boxbox::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().passMargin, 0.0, boxbox::kTimeEpsilon);
 
     const double inf = std::numeric_limits<double>::infinity();
     const double nan = std::numeric_limits<double>::quiet_NaN();
 
-    for (const double gap : {0.0, -0.5, undercut::kMinOvertakeGap / 2.0, inf, nan}) {
+    for (const double gap : {0.0, -0.5, boxbox::kMinOvertakeGap / 2.0, inf, nan}) {
         OvertakeRule bad = good;
         bad.minGap = gap;
         CHECK_THROWS(simulator.setOvertakeRule(bad));
@@ -1144,21 +1144,21 @@ void testOvertakeRuleSettings() {
     }
 
     // A rejected rule leaves the previous one in place.
-    CHECK_NEAR(simulator.overtakeRule().minGap, 0.8, undercut::kTimeEpsilon);
-    CHECK_NEAR(simulator.overtakeRule().passMargin, 0.0, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().minGap, 0.8, boxbox::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().passMargin, 0.0, boxbox::kTimeEpsilon);
 
     // The floor itself is accepted.
     OvertakeRule atFloor = good;
-    atFloor.minGap = undercut::kMinOvertakeGap;
+    atFloor.minGap = boxbox::kMinOvertakeGap;
     simulator.setOvertakeRule(atFloor);
-    CHECK_NEAR(simulator.overtakeRule().minGap, undercut::kMinOvertakeGap, undercut::kTimeEpsilon);
+    CHECK_NEAR(simulator.overtakeRule().minGap, boxbox::kMinOvertakeGap, boxbox::kTimeEpsilon);
 }
 
 void testOvertakingHandCases() {
     beginSection("FR-9: pass or hold, hand-computed");
 
     const std::vector<PlannedStint> fast3 = {PlannedStint{kFast, 3}};
-    const double eps = undercut::kTimeEpsilon;
+    const double eps = boxbox::kTimeEpsilon;
 
     // (a) Equal pace from the grid. Every car starts at 0.0, so the grid is
     // car-number order. On lap 1 each car is held exactly minGap behind the
@@ -1276,7 +1276,7 @@ void testOvertakingHandCases() {
 void testOvertakingProperties() {
     beginSection("FR-9: properties over seeded fields");
 
-    const std::vector<TireCompound> compounds = undercut::defaultCompounds();
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
     const int lastCompound = static_cast<int>(compounds.size()) - 1;
     Lcg random(0x0BE7A11DULL);
 
@@ -1345,7 +1345,7 @@ void testOvertakingProperties() {
             const Driver& raced = on.drivers()[i];
 
             // Off by default: every car runs exactly its own plan, untouched.
-            CHECK_NEAR(clean.cumulativeTime(), plans[i].totalTime, undercut::kClosureTolerance);
+            CHECK_NEAR(clean.cumulativeTime(), plans[i].totalTime, boxbox::kClosureTolerance);
             CHECK_NEAR(clean.trafficLoss(), 0.0, 0.0);
 
             // On: the plan still runs lap for lap and stop for stop...
@@ -1355,10 +1355,10 @@ void testOvertakingProperties() {
             // ...traffic can only cost time, and costs exactly what it recorded.
             CHECK_MSG(raced.trafficLoss() >= 0.0, detail.str());
             CHECK_MSG(raced.cumulativeTime() >=
-                          clean.cumulativeTime() - undercut::kClosureTolerance,
+                          clean.cumulativeTime() - boxbox::kClosureTolerance,
                       "traffic must never make a car faster: " + detail.str());
             CHECK_NEAR(raced.cumulativeTime() - clean.cumulativeTime(), raced.trafficLoss(),
-                       undercut::kClosureTolerance);
+                       boxbox::kClosureTolerance);
 
             // Deterministic: the same field twice gives the same race, exactly.
             CHECK_NEAR(raced.cumulativeTime(), onAgain.drivers()[i].cumulativeTime(), 0.0);
@@ -1395,7 +1395,7 @@ void testOvertakingProperties() {
         solo.addDriver(1, "SOLO", best);
         solo.runToFinish();
         CHECK_NEAR(solo.drivers().front().cumulativeTime(), best.totalTime,
-                   undercut::kClosureTolerance);
+                   boxbox::kClosureTolerance);
         CHECK_NEAR(solo.drivers().front().trafficLoss(), 0.0, 0.0);
     }
 
@@ -1405,7 +1405,7 @@ void testOvertakingProperties() {
 }  // namespace
 
 int main() {
-    std::cout << "Undercut test harness\n";
+    std::cout << "Box Box test harness\n";
     std::cout << "---------------------\n";
 
     testToleranceHelpers();

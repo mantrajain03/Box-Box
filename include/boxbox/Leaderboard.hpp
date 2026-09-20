@@ -1,10 +1,10 @@
-#ifndef UNDERCUT_LEADERBOARD_HPP
-#define UNDERCUT_LEADERBOARD_HPP
+#ifndef BOXBOX_LEADERBOARD_HPP
+#define BOXBOX_LEADERBOARD_HPP
 
 #include <cstddef>
 #include <vector>
 
-namespace undercut {
+namespace boxbox {
 
 /// One car's timing line: enough to order it against the rest of the field,
 /// plus an opaque index the caller can use to get back to its own record.
@@ -88,6 +88,6 @@ private:
     std::vector<LeaderboardEntry> heap_;
 };
 
-}  // namespace undercut
+}  // namespace boxbox
 
-#endif  // UNDERCUT_LEADERBOARD_HPP
+#endif  // BOXBOX_LEADERBOARD_HPP

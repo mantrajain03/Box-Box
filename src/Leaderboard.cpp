@@ -1,10 +1,10 @@
-#include "undercut/Leaderboard.hpp"
+#include "boxbox/Leaderboard.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
 
-namespace undercut {
+namespace boxbox {
 
 bool Leaderboard::isAhead(const LeaderboardEntry& a, const LeaderboardEntry& b) noexcept {
     if (a.lapsCompleted != b.lapsCompleted) {
@@ -125,4 +125,4 @@ std::vector<LeaderboardEntry> Leaderboard::ordered() const {
     return copy.drainOrdered();
 }
 
-}  // namespace undercut
+}  // namespace boxbox
