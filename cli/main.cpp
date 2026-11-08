@@ -13,6 +13,7 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -21,9 +22,12 @@
 #include "boxbox/Common.hpp"
 #include "boxbox/Driver.hpp"
 #include "boxbox/PitStrategy.hpp"
+#include "boxbox/RaceLapAnalytics.hpp"
 #include "boxbox/RaceSimulator.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
+#include "RaceLapReport.hpp"
+#include "TireCommands.hpp"
 
 namespace {
 
@@ -211,6 +215,9 @@ void printUsage(std::ostream& out) {
         "                          --simulate. Shows how compounds diverge.\n"
         "  --lap-log N             Print the standings every N laps. Implies\n"
         "                          --simulate. 0 disables. Default 0.\n"
+        "  --race-laps FROM:TO     For laps FROM to TO, print each car's fastest\n"
+        "                          lap and total lap time, and how many pairs of\n"
+        "                          cars swapped places. Implies --simulate.\n"
         "\n"
         "Overtaking (FR-9, off by default):\n"
         "  --overtake              A car that catches the one ahead is held\n"
@@ -220,6 +227,12 @@ void printUsage(std::ostream& out) {
         "                          Default " << formatSeconds(defaults.minGap, 1) << ". Implies --overtake.\n"
         "  --pass-margin SECONDS   Lap-time advantage needed to pass.\n"
         "                          Default " << formatSeconds(defaults.passMargin, 1) << ". Implies --overtake.\n"
+        "\n"
+        "Tire analytics:\n"
+        "  tires COMMAND ...       Degradation profiles, range queries and\n"
+        "                          threshold queries for the compound set above.\n"
+        "                          Must come after the race options. See\n"
+        "                          `boxbox tires help`.\n"
         "\n"
         "Output:\n"
         "  --show-table            Print the per-compound stint-cost table.\n"
@@ -448,8 +461,12 @@ struct Options {
     bool simulate = false;
     bool rivals = false;
     int lapLog = 0;
+    int raceLapsFrom = 0;  // --race-laps FROM:TO; 0 means not requested
+    int raceLapsTo = 0;
     OvertakeRule overtake;  // validated by the core, in RaceSimulator::setOvertakeRule
     bool showHelp = false;
+    bool tires = false;                  // `tires` subcommand given
+    std::vector<std::string> tiresArgs;  // everything after the word `tires`
 };
 
 /// Returns the value that follows `--flag`, or throws if it is missing.
@@ -517,6 +534,18 @@ Options parseArguments(int argc, char** argv) {
                 throw std::invalid_argument("--lap-log: must not be negative");
             }
             options.simulate = true;
+        } else if (arg == "--race-laps") {
+            const std::string spec = requireValue(argc, argv, i, arg);
+            const std::vector<std::string> parts = split(spec, ':');
+            if (parts.size() != 2U) {
+                throw std::invalid_argument("--race-laps \"" + spec + "\": expected FROM:TO");
+            }
+            options.raceLapsFrom = parseInt(parts[0], "--race-laps FROM");
+            options.raceLapsTo = parseInt(parts[1], "--race-laps TO");
+            if (options.raceLapsFrom < 1 || options.raceLapsFrom > options.raceLapsTo) {
+                throw std::invalid_argument("--race-laps: need 1 <= FROM <= TO");
+            }
+            options.simulate = true;
         } else if (arg == "--overtake") {
             options.overtake.enabled = true;
             options.simulate = true;
@@ -529,6 +558,14 @@ Options parseArguments(int argc, char** argv) {
                 parseDouble(requireValue(argc, argv, i, arg), "--pass-margin");
             options.overtake.enabled = true;
             options.simulate = true;
+        } else if (arg == "tires") {
+            // The rest of the line belongs to the tires handler, whose own
+            // options (such as --compound NAME) mean something different.
+            options.tires = true;
+            for (int j = i + 1; j < argc; ++j) {
+                options.tiresArgs.emplace_back(argv[j]);
+            }
+            break;
         } else {
             throw std::invalid_argument("unrecognised option \"" + arg +
                                         "\"; try --help");
@@ -572,6 +609,17 @@ int main(int argc, char** argv) {
             options.compoundsOverridden ? options.compounds : boxbox::defaultCompounds();
 
         const PitStrategy strategy(track, compounds);
+
+        if (options.tires) {
+            return boxbox::runTiresCommand(options.tiresArgs, strategy, std::cout, std::cerr);
+        }
+
+        // Checked before anything is printed, like the FR-9 settings below.
+        if (options.raceLapsTo > track.totalLaps()) {
+            throw std::invalid_argument("--race-laps: lap " + std::to_string(options.raceLapsTo) +
+                                        " is past the race distance of " +
+                                        std::to_string(track.totalLaps()) + " laps");
+        }
 
         // Built before anything is printed, so a bad FR-9 setting is reported
         // like any other usage error instead of halfway through the output.
@@ -618,17 +666,37 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // --race-laps: the recorder watches the race from outside and
+            // never changes it. Without the flag it does not exist.
+            std::optional<boxbox::RaceLapRecorder> recorder;
+            if (options.raceLapsFrom > 0) {
+                recorder.emplace(simulator);
+            }
+
             if (options.lapLog > 0) {
                 while (simulator.advanceLap()) {
+                    if (recorder) {
+                        recorder->observe(simulator);
+                    }
                     if (simulator.lapsRun() % options.lapLog == 0 || simulator.finished()) {
                         std::ostringstream heading;
                         heading << "After lap " << simulator.lapsRun();
                         printStandings(simulator, heading.str());
                     }
                 }
+            } else if (recorder) {
+                while (simulator.advanceLap()) {
+                    recorder->observe(simulator);
+                }
+                printStandings(simulator, "Final classification");
             } else {
                 simulator.runToFinish();
                 printStandings(simulator, "Final classification");
+            }
+
+            if (recorder) {
+                boxbox::printRaceLapReport(std::cout, simulator, *recorder, options.raceLapsFrom,
+                                           options.raceLapsTo);
             }
 
             // FR-8 is defined on a single-driver, no-overtake race. Replay the
