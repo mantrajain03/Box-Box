@@ -31,6 +31,7 @@
 #include "boxbox/Track.hpp"
 
 #include "DriverAnalyticsTests.hpp"
+#include "EventTests.hpp"
 #include "TireModuleTests.hpp"
 
 namespace {
@@ -1439,6 +1440,10 @@ int main() {
     const DriverTestTally drivers = runDriverAnalyticsTests();
     g_checks += drivers.checks;
     g_failures += drivers.failures;
+
+    const EventTestTally events = runEventEngineTests();
+    g_checks += events.checks;
+    g_failures += events.failures;
 
     std::cout << "\n---------------------\n";
     std::cout << g_checks << " checks, " << g_failures << " failed\n";

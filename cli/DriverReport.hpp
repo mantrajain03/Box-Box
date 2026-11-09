@@ -18,9 +18,14 @@ void printDriverStats(std::ostream& out, const RaceSimulator& simulator,
                       const DriverAnalytics& analytics);
 
 /// --top-laps K: the K fastest and K slowest laps of the race, and the
-/// fastest lap on each compound.
+/// fastest lap on each compound. `filter` narrows every table to one car
+/// and/or a range of laps (--top-laps-car, --top-laps-range); the default
+/// considers every lap.
+/// \throws std::invalid_argument if the filter names a car that is not in the
+///         field.
 void printTopLaps(std::ostream& out, const RaceSimulator& simulator,
-                  const DriverAnalytics& analytics, std::size_t k);
+                  const DriverAnalytics& analytics, std::size_t k,
+                  const LapFilter& filter = LapFilter{});
 
 /// --lap-window W: each car's quickest and slowest run of W laps, and its
 /// widest lap-time spread within W laps.

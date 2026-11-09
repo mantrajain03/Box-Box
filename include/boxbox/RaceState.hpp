@@ -1,7 +1,10 @@
 #ifndef BOXBOX_RACESTATE_HPP
 #define BOXBOX_RACESTATE_HPP
 
+#include <cstddef>
 #include <stdexcept>
+#include <string>
+#include "boxbox/EventLog.hpp"
 #include "boxbox/RaceEvent.hpp"
 
 /// Legal per-driver race-state transitions, driven by RaceEvents
@@ -43,6 +46,20 @@ private:
     int driverNumber_;
     DriverRaceState state_ = DriverRaceState::Racing;
 };
+
+/// Result of replaying a whole log through the per-driver state machines.
+struct EventLogValidation {
+    bool valid = true;
+    std::size_t badIndex = 0;  ///< index of the first offending entry, if !valid
+    std::string message;       ///< empty when valid
+};
+
+/// Replay `log` in order, one RaceState per driver (created on first sight),
+/// and check that the log is in canonical eventComesBefore order. Stops at the
+/// first problem. A driver that has not reached Finished is NOT an error: a
+/// log of a partly-run race is legal.
+/// O(n) expected for n events (hash map from driver number to state).
+EventLogValidation validateEventLog(const EventLog& log);
 
 }  // namespace boxbox
 

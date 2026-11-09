@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "boxbox/Common.hpp"
+#include "boxbox/LapTime.hpp"
 
 namespace boxbox {
 
@@ -88,7 +89,7 @@ double RaceSimulator::lapTimeFor(const Driver& driver) const {
         return 0.0;
     }
     const TireCompound& compound = compounds_[driver.currentCompoundIndex()];
-    return track_.baseLapTime() + compound.lapDelta(driver.tireAge());
+    return canonicalLapTime(track_, compound, driver.tireAge());
 }
 
 // O(D) per lap with overtaking off; O(D log D) with it on.
@@ -133,6 +134,7 @@ void RaceSimulator::advanceLapWithTraffic() {
     int aheadLaps = 0;
     double aheadCrossing = 0.0;  // when it crossed the line, before any pit loss
     double aheadPace = 0.0;      // its own lap time from sec. 3.2
+    int aheadNumber = -1;        // its car number, for event payloads
 
     for (const LeaderboardEntry& entry : order) {
         Driver& driver = drivers_[entry.driverIndex];
@@ -162,12 +164,18 @@ void RaceSimulator::advanceLapWithTraffic() {
         const std::size_t stintBefore = driver.stintIndex();
         const std::size_t compoundBefore = driver.currentCompoundIndex();
         driver.completeLap(pace, track_.pitLoss(), delay);
-        emitLapEvents(driver, stintBefore, compoundBefore);
+
+        TrafficOutcome outcome = TrafficOutcome::Clear;
+        if (caught) {
+            outcome = canPass ? TrafficOutcome::Passed : TrafficOutcome::Held;
+        }
+        emitLapEvents(driver, stintBefore, compoundBefore, outcome, aheadNumber, delay);
 
         haveAhead = true;
         aheadLaps = entry.lapsCompleted;
         aheadCrossing = crossing;
         aheadPace = pace;
+        aheadNumber = driver.number();
     }
 }
 
@@ -187,9 +195,14 @@ void RaceSimulator::reset() {
     }
     lapsRun_ = 0;
 }
+
+// Event emission is a read-only side channel: nothing here touches a Driver,
+// so logging cannot change race times (plan 4.4C).
 void RaceSimulator::emitLapEvents(const Driver& driver,
                                    std::size_t stintIndexBefore,
-                                   std::size_t compoundIndexBefore) {
+                                   std::size_t compoundIndexBefore,
+                                   TrafficOutcome outcome, int other,
+                                   double holdSeconds) {
     if (eventSink_ == nullptr) {
         return;
     }
@@ -199,7 +212,29 @@ void RaceSimulator::emitLapEvents(const Driver& driver,
     lapEvent.timestamp = driver.cumulativeTime();
     lapEvent.driverNumber = driver.number();
     lapEvent.lap = driver.lapsCompleted();
+    lapEvent.oldCompoundIndex = static_cast<int>(compoundIndexBefore);
     eventSink_->push(lapEvent);
+
+    if (outcome != TrafficOutcome::Clear) {
+        RaceEvent traffic;
+        traffic.type = outcome == TrafficOutcome::Passed ? RaceEventType::Overtake
+                                                         : RaceEventType::TrafficHold;
+        traffic.timestamp = driver.cumulativeTime();
+        traffic.driverNumber = driver.number();
+        traffic.lap = driver.lapsCompleted();
+        traffic.otherDriverNumber = other;
+        traffic.holdLossSeconds = outcome == TrafficOutcome::Held ? holdSeconds : 0.0;
+        eventSink_->push(traffic);
+    }
+
+    if (driver.finished()) {
+        RaceEvent finish;
+        finish.type = RaceEventType::RaceFinish;
+        finish.timestamp = driver.cumulativeTime();
+        finish.driverNumber = driver.number();
+        finish.lap = driver.lapsCompleted();
+        eventSink_->push(finish);
+    }
 
     const bool stopped = driver.stintIndex() != stintIndexBefore;
     if (stopped) {

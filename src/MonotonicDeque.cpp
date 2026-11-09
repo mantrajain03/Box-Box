@@ -10,6 +10,9 @@ MonotonicDeque::MonotonicDeque(std::size_t window, Kind kind) : window_(window),
     if (window_ == 0U) {
         throw std::invalid_argument("MonotonicDeque: the window must hold at least one value");
     }
+    if (window_ > kMaxWindow) {
+        throw std::invalid_argument("MonotonicDeque: the window is larger than kMaxWindow");
+    }
     ring_.resize(window_);
 }
 

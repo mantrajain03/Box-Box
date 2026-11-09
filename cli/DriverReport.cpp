@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <ostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -159,26 +160,47 @@ void printDriverStats(std::ostream& out, const RaceSimulator& simulator,
 }
 
 void printTopLaps(std::ostream& out, const RaceSimulator& simulator,
-                  const DriverAnalytics& analytics, std::size_t k) {
+                  const DriverAnalytics& analytics, std::size_t k, const LapFilter& filter) {
+    if (filter.driverNumber && !analytics.contains(*filter.driverNumber)) {
+        throw std::invalid_argument("--top-laps-car: no car numbered " +
+                                    std::to_string(*filter.driverNumber) + " in this race");
+    }
+
     const std::vector<LapRecord>& all = analytics.records();
     if (all.empty()) {
         out << "Fastest and slowest laps   no laps were run\n\n";
         return;
     }
 
-    const std::vector<LapRecord> fastest = selectLaps(all, k, LapOrder::Fastest);
-    const std::vector<LapRecord> slowest = selectLaps(all, k, LapOrder::Slowest);
+    const std::vector<LapRecord> fastest = selectLaps(all, k, LapOrder::Fastest, filter);
+    const std::vector<LapRecord> slowest = selectLaps(all, k, LapOrder::Slowest, filter);
+    const std::size_t matching = selectLaps(all, all.size(), LapOrder::Fastest, filter).size();
 
-    out << "Fastest " << fastest.size() << " of " << all.size()
-        << " laps   lap times include traffic, not pit loss\n";
+    std::string scope = "of ";
+    scope += std::to_string(matching) + " laps";
+    if (filter.driverNumber) {
+        scope += " of car " + std::to_string(*filter.driverNumber);
+    }
+    if (filter.firstLap > 1 || filter.lastLap != LapFilter{}.lastLap) {
+        scope += " in laps " + std::to_string(filter.firstLap) + "-" +
+                 (filter.lastLap == LapFilter{}.lastLap ? std::string("end")
+                                                         : std::to_string(filter.lastLap));
+    }
+    if (matching == 0U) {
+        out << "Fastest and slowest laps   no laps match the filter\n\n";
+        return;
+    }
+
+    out << "Fastest " << fastest.size() << ' ' << scope
+        << "   lap times include traffic, not pit loss\n";
     printLapTable(out, simulator, analytics, fastest);
-    out << "\nSlowest " << slowest.size() << " of " << all.size() << " laps\n";
+    out << "\nSlowest " << slowest.size() << ' ' << scope << '\n';
     printLapTable(out, simulator, analytics, slowest);
     out << "  Equal lap times are listed by lap, then car number.\n\n";
 
     out << "Fastest lap on each compound\n";
     for (std::size_t c = 0; c < simulator.compounds().size(); ++c) {
-        LapFilter onCompound;
+        LapFilter onCompound = filter;  // keep any car / lap-range narrowing
         onCompound.compoundIndex = c;
         const std::vector<LapRecord> best = selectLaps(all, 1U, LapOrder::Fastest, onCompound);
         out << "  " << std::left << std::setw(12) << simulator.compounds()[c].name() << std::right;

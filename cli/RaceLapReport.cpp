@@ -32,7 +32,7 @@ void printRaceLapReport(std::ostream& out, const RaceSimulator& simulator,
         << "   lap times include traffic, not pit loss\n";
     out << "  " << std::right << std::setw(4) << "#" << "  " << std::left << std::setw(16)
         << "driver" << std::right << std::setw(14) << "fastest lap" << std::setw(9) << "on lap"
-        << std::setw(16) << "window total" << '\n';
+        << std::setw(16) << "window total" << std::setw(14) << "traffic lost" << '\n';
 
     const std::vector<Driver>& drivers = simulator.drivers();
     for (std::size_t i = 0; i < drivers.size(); ++i) {
@@ -41,7 +41,8 @@ void printRaceLapReport(std::ostream& out, const RaceSimulator& simulator,
         out << "  " << std::right << std::setw(4) << drivers[i].number() << "  " << std::left
             << std::setw(16) << drivers[i].name() << std::right << std::setw(14)
             << seconds(best.seconds) << std::setw(9) << best.lap << std::setw(16)
-            << seconds(laps.totalTime(firstLap, lastLap)) << '\n';
+            << seconds(laps.totalTime(firstLap, lastLap)) << std::setw(14)
+            << seconds(recorder.trafficLoss(i, firstLap, lastLap)) << '\n';
     }
 
     const std::int64_t swaps = recorder.swapsBetween(firstLap - 1, lastLap);

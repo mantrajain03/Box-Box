@@ -24,6 +24,7 @@
 #include "boxbox/EventPriorityQueue.hpp"
 #include "boxbox/PitAnalytics.hpp"
 #include "boxbox/RaceEvent.hpp"
+#include "boxbox/RaceState.hpp"
 #include "boxbox/Driver.hpp"
 #include "boxbox/DriverAnalytics.hpp"
 #include "boxbox/PitStrategy.hpp"
@@ -352,7 +353,9 @@ void printUsage(std::ostream& out) {
         "                          rankings.\n"
         "  --top-laps K            The K fastest and K slowest laps of the race,\n"
         "                          and the fastest lap on each compound.\n"
-        "  --lap-window W          Each car's quickest and slowest run of W laps,\n"
+        "  --top-laps-car N        With --top-laps: only car number N's laps.\n"
+        "  --top-laps-range F:T    With --top-laps: only laps F to T (inclusive).\n"
+        "  --lap-window W         Each car's quickest and slowest run of W laps,\n"
         "                          and its widest lap-time spread within W laps.\n"
         "\n"
         "Tire analytics:\n"
@@ -376,11 +379,8 @@ void printUsage(std::ostream& out) {
         "  boxbox --laps 50 --pit-loss 22.0\n"
         "  boxbox --laps 50 --rivals --lap-log 10\n"
         "  boxbox --laps 50 --rivals --overtake --lap-log 10\n"
-<<<<<<< HEAD
         "  boxbox --laps 50 --rivals --overtake --driver-stats --top-laps 5\n"
-=======
         "  boxbox --laps 50 --events --pit-report\n"
->>>>>>> 71e2442d21b2b31a816b361faa026d822b209f48
         "  boxbox --laps 4 --pit-loss 5 --sector 10 \\\n"
         "           --compound A:0:1:3 --compound B:2:0:4 --show-table\n";
 }
@@ -604,6 +604,9 @@ struct Options {
     bool driverStats = false;  // --driver-stats
     int topLaps = 0;           // --top-laps K; 0 means not requested
     int lapWindow = 0;         // --lap-window W; 0 means not requested
+    int topLapsCar = 0;        // --top-laps-car N; 0 means every car
+    int topLapsFrom = 0;       // --top-laps-range FROM:TO; 0 means every lap
+    int topLapsTo = 0;
     OvertakeRule overtake;  // validated by the core, in RaceSimulator::setOvertakeRule
     bool showHelp = false;
     bool tires = false;                  // `tires` subcommand given
@@ -702,6 +705,22 @@ Options parseArguments(int argc, char** argv) {
                 throw std::invalid_argument("--top-laps: must be at least 1");
             }
             options.simulate = true;
+        } else if (arg == "--top-laps-car") {
+            options.topLapsCar = parseInt(requireValue(argc, argv, i, arg), "--top-laps-car");
+            if (options.topLapsCar < 1) {
+                throw std::invalid_argument("--top-laps-car: car numbers start at 1");
+            }
+        } else if (arg == "--top-laps-range") {
+            const std::string spec = requireValue(argc, argv, i, arg);
+            const std::vector<std::string> parts = split(spec, ':');
+            if (parts.size() != 2U) {
+                throw std::invalid_argument("--top-laps-range \"" + spec + "\": expected FROM:TO");
+            }
+            options.topLapsFrom = parseInt(parts[0], "--top-laps-range FROM");
+            options.topLapsTo = parseInt(parts[1], "--top-laps-range TO");
+            if (options.topLapsFrom < 1 || options.topLapsFrom > options.topLapsTo) {
+                throw std::invalid_argument("--top-laps-range: need 1 <= FROM <= TO");
+            }
         } else if (arg == "--lap-window") {
             options.lapWindow = parseInt(requireValue(argc, argv, i, arg), "--lap-window");
             if (options.lapWindow < 1) {
@@ -732,6 +751,10 @@ Options parseArguments(int argc, char** argv) {
             throw std::invalid_argument("unrecognised option \"" + arg +
                                         "\"; try --help");
         }
+    }
+
+    if (options.topLaps == 0 && (options.topLapsCar > 0 || options.topLapsFrom > 0)) {
+        throw std::invalid_argument("--top-laps-car and --top-laps-range need --top-laps K");
     }
 
     return options;
@@ -877,9 +900,24 @@ int main(int argc, char** argv) {
                 printStandings(simulator, "Final classification");
             }
 
+            if (recorder) {
+                boxbox::printRaceLapReport(std::cout, simulator, *recorder, options.raceLapsFrom,
+                                           options.raceLapsTo);
+            }
+
             if (options.showEvents || options.showPitReport) {
                 while (!eventQueue.empty()) {
                     eventLog.record(eventQueue.pop());
+                }
+
+                // Replay the log through the per-driver state machines. The
+                // simulator only ever emits legal sequences, so a failure here
+                // is a real bug and is reported as a failed check.
+                const boxbox::EventLogValidation check = boxbox::validateEventLog(eventLog);
+                if (!check.valid) {
+                    std::cerr << "boxbox: event log failed state-machine validation at entry "
+                              << check.badIndex << ": " << check.message << '\n';
+                    return kExitClosureFailed;
                 }
             }
 
@@ -896,8 +934,16 @@ int main(int argc, char** argv) {
                     boxbox::printDriverStats(std::cout, simulator, analytics);
                 }
                 if (options.topLaps > 0) {
+                    boxbox::LapFilter filter;
+                    if (options.topLapsCar > 0) {
+                        filter.driverNumber = options.topLapsCar;
+                    }
+                    if (options.topLapsFrom > 0) {
+                        filter.firstLap = options.topLapsFrom;
+                        filter.lastLap = options.topLapsTo;
+                    }
                     boxbox::printTopLaps(std::cout, simulator, analytics,
-                                         static_cast<std::size_t>(options.topLaps));
+                                         static_cast<std::size_t>(options.topLaps), filter);
                 }
                 if (options.lapWindow > 0) {
                     boxbox::printLapWindows(std::cout, analytics,

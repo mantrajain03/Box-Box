@@ -1282,6 +1282,43 @@ void testRaceLapRecorder() {
                     }
                 }
             }
+
+            // Traffic loss (Fenwick-backed) against a plain reference: each lap's
+            // traffic is its recorded time minus the model lap worked out from
+            // the plan alone.
+            std::vector<double> perLap;
+            for (const boxbox::Stint& stint : d.plan()) {
+                for (int age = 0; age < stint.laps; ++age) {
+                    const double model =
+                        track.baseLapTime() + compounds[stint.compoundIndex].lapDelta(age);
+                    perLap.push_back(rec.lapTime(static_cast<int>(perLap.size()) + 1) - model);
+                }
+            }
+            TCHECK_NEAR(recorder.trafficLoss(i, 1, laps), d.trafficLoss(), 1e-9);
+            for (int q = 0; q < 4; ++q) {
+                const int first = rng.nextInt(1, laps);
+                const int last = rng.nextInt(first, laps);
+                double expected = 0.0;
+                for (int lap = first; lap <= last; ++lap) {
+                    expected += perLap[static_cast<std::size_t>(lap - 1)];
+                }
+                TCHECK_NEAR(recorder.trafficLoss(i, first, last), expected, 1e-9);
+            }
+            if (!overtaking) {
+                TCHECK_NEAR(recorder.trafficLoss(i, 1, laps), 0.0, 0.0);
+            }
+        }
+
+        if (laps > 0) {
+            double fieldTotal = 0.0;
+            for (const boxbox::Driver& d : sim.drivers()) {
+                fieldTotal += d.trafficLoss();
+            }
+            TCHECK_NEAR(recorder.fieldTrafficLoss(1, laps), fieldTotal, 1e-9);
+            TCHECK_THROWS(recorder.trafficLoss(0, 0, laps), std::out_of_range);
+            TCHECK_THROWS(recorder.trafficLoss(0, 1, laps + 1), std::out_of_range);
+            TCHECK_THROWS(recorder.trafficLoss(sim.drivers().size(), 1, 1), std::out_of_range);
+            TCHECK_THROWS(recorder.fieldTrafficLoss(2, 1), std::out_of_range);
         }
 
         if (overtaking) {
@@ -1328,6 +1365,17 @@ void testRaceLapRecorderMisuse() {
     fresh.observe(sim);
     TCHECK(fresh.lapsObserved() == 1);
     TCHECK(fresh.swapsBetween(0, 1) == 0);  // identical cars stay in grid order
+
+    // A repeated observe() with no lap run between is harmless: it must not
+    // push a second running order and put lapsObserved() ahead of the laps.
+    fresh.observe(sim);
+    TCHECK(fresh.lapsObserved() == 1);
+    TCHECK(fresh.carLaps(0).recordedLaps() == 1);
+    TCHECK_NEAR(fresh.carLaps(0).totalTime(1, fresh.lapsObserved()),
+                fresh.carLaps(0).lapTime(1), 0.0);  // the report's window still works
+    sim.advanceLap();
+    fresh.observe(sim);
+    TCHECK(fresh.lapsObserved() == 2);
 }
 
 }  // namespace

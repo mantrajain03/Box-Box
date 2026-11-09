@@ -33,6 +33,11 @@ void checkRecord(const LapRecord& r, const LapRecord* previous, std::size_t fiel
     if (!std::isfinite(r.trafficTime) || r.trafficTime < 0.0) {
         throw std::invalid_argument(where + "traffic time must be finite and not negative");
     }
+    // The lap time includes traffic (LapRecord.hpp), so traffic cannot exceed
+    // it. The tolerance absorbs the rounding of a difference of running totals.
+    if (r.trafficTime > r.lapTime + kTimeEpsilon) {
+        throw std::invalid_argument(where + "traffic time exceeds the lap time that includes it");
+    }
     if (!std::isfinite(r.pitTime) || r.pitTime < 0.0) {
         throw std::invalid_argument(where + "pit time must be finite and not negative");
     }

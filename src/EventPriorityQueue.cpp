@@ -1,11 +1,18 @@
 #include "boxbox/EventPriorityQueue.hpp"
 
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
 namespace boxbox {
 
 void EventPriorityQueue::push(RaceEvent event) {
+    // Invalid-time policy: reject. A NaN timestamp would break the strict weak
+    // order the heap relies on, and a negative one is before the race began.
+    if (!std::isfinite(event.timestamp) || event.timestamp < 0.0) {
+        throw std::invalid_argument(
+            "EventPriorityQueue::push: timestamp must be finite and not negative");
+    }
     event.sequenceId = nextSequenceId_++;
     heap_.push_back(std::move(event));
     siftUp(heap_.size() - 1);

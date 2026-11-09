@@ -156,8 +156,16 @@ private:
 
     /// One lap under the FR-9 rule. O(D log D).
     void advanceLapWithTraffic();
+    /// How the FR-9 rule treated a car on the lap just completed.
+    enum class TrafficOutcome { Clear, Passed, Held };
+
+    /// Emit this lap's events to the sink, if one is set. `other` is the car
+    /// directly ahead and `holdSeconds` the time lost; both are only
+    /// meaningful for Passed / Held.
     void emitLapEvents(const Driver& driver, std::size_t stintIndexBefore,
-                        std::size_t compoundIndexBefore);
+                        std::size_t compoundIndexBefore,
+                        TrafficOutcome outcome = TrafficOutcome::Clear,
+                        int other = -1, double holdSeconds = 0.0);
 
     /// Turn an already-ordered entry list into positions and gaps. O(D).
     std::vector<Standing> toStandings(const std::vector<LeaderboardEntry>& ordered) const;

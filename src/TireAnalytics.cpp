@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "boxbox/Common.hpp"
+#include "boxbox/LapTime.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 
@@ -60,8 +61,8 @@ DegradationProfile DegradationProfile::fromStrategy(const PitStrategy& strategy,
     p.lapTime_.resize(m);
     p.stintCost_.assign(m + 1U, 0.0);
     for (int age = 0; age < maxStint; ++age) {
-        // The canonical lap: the same sum RaceSimulator::lapTimeFor uses.
-        const double lap = track.baseLapTime() + compound.lapDelta(age);
+        // The canonical lap: the very function RaceSimulator::lapTimeFor calls.
+        const double lap = canonicalLapTime(track, compound, age);
         requireFinite(lap, "DegradationProfile: lap time");
         p.lapTime_[static_cast<std::size_t>(age)] = lap;
 

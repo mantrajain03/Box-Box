@@ -44,12 +44,19 @@ public:
     ///        what each query needs; PitAnalytics does not take ownership.
     explicit PitAnalytics(const EventLog& log) : log_(log) {}
 
+    /// The log is held by reference, so a temporary would dangle.
+    explicit PitAnalytics(EventLog&&) = delete;
+
     /// Per-driver stop count, stint lengths, compounds used, and stop laps.
+    /// Every stint is reported, including the first and the final one, so the
+    /// stint lengths sum to the laps the driver completed.
     /// O(n) over the log's entries for n total events.
     DriverPitSummary summaryFor(int driverNumber) const;
 
     /// Summaries for every distinct driver number seen in the log, in first-
-    /// appearance order. O(n).
+    /// appearance order. One pass with a hash map from driver number to slot:
+    /// O(n) expected for n events (O(n * D) worst case under pathological
+    /// hashing), O(D) extra space.
     std::vector<DriverPitSummary> allSummaries() const;
 
     /// Total pit loss charged to `driverNumber`, i.e. (stopCount) * pitLoss,
@@ -66,16 +73,18 @@ public:
     };
     PitWindow pitWindow() const;
 
-        /// Simplified undercut/overcut: evaluates the SAME stint plan twice,
-    /// once stopping at `earlierLap` and once at `laterLap`, via
-    /// PitStrategy::evaluatePlan, and reports the time difference. This
+    /// Simplified undercut/overcut: evaluates two stint plans via
+    /// PitStrategy::evaluatePlan and reports the time difference. This
     /// reuses the canonical lap-time model rather than re-deriving it, per
     /// the plan's instruction to use "the existing plan evaluator."
     ///
-    /// `baselinePlan` must already reflect a stop at `earlierLap`: this
-    /// function does not construct plans itself, only compares two the
-    /// caller supplies. `laterPlan` must be the same race shifted so its
-    /// first stint instead ends at `laterLap`.
+    /// This function does not construct plans, only compares two the caller
+    /// supplies. `earlierPlan`'s first stint must end on `earlierLap` and
+    /// `laterPlan`'s first stint on `laterLap`; the rest of each plan is
+    /// whatever the caller wants to compare. Simplified model: no traffic,
+    /// tire warm-up or real pit-window rules.
+    /// \throws std::invalid_argument if earlierLap >= laterLap, a plan is
+    ///         empty, or a plan's first stint does not end on its stated lap.
     static UndercutOvercutResult compareUndercutOvercut(
         const PitStrategy& strategy, const std::vector<PlannedStint>& earlierPlan,
         const std::vector<PlannedStint>& laterPlan, int earlierLap, int laterLap);

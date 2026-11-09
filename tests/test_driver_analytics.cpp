@@ -976,6 +976,12 @@ void testAnalyticsValidation() {
     DCHECK(broken([](std::vector<LapRecord>& r) { r[0].position = 0; }));
     DCHECK(broken([](std::vector<LapRecord>& r) { r[0].position = 2; }));  // one car in the field
     DCHECK(broken([](std::vector<LapRecord>& r) { r[0].tireAge = -1; }));
+    // The lap time includes traffic, so traffic cannot be larger than the lap.
+    DCHECK(broken([](std::vector<LapRecord>& r) { r[0].trafficTime = 95.0; }));
+    DCHECK(!broken([](std::vector<LapRecord>& r) { r[0].trafficTime = 90.0; }));  // all of it
+    // A window past MonotonicDeque::kMaxWindow is refused up front, not by the allocator.
+    DCHECK_THROWS(MonotonicDeque(MonotonicDeque::kMaxWindow + 1U, MonotonicDeque::Kind::Minimum),
+                  std::invalid_argument);
     // The legal version: a stop with a zero pit loss, then new tires in stint 1.
     DCHECK(!broken([](std::vector<LapRecord>& r) {
         r[0].pitStop = true;

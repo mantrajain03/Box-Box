@@ -31,6 +31,7 @@
 #include "boxbox/FenwickTree.hpp"
 #include "boxbox/RaceLapAnalytics.hpp"
 #include "boxbox/SegmentTree.hpp"
+#include "boxbox/TireAnalytics.hpp"
 
 namespace {
 
@@ -229,6 +230,154 @@ bool benchSize(const std::string& label, std::size_t n, std::size_t queryCount) 
     return sumOk && minOk && fenOk;
 }
 
+/// Fenwick linear build (O(n), each node pushes once into its parent) against
+/// the simple way, n point adds onto a zero tree (O(n log n)).
+bool benchFenwickBuild(const std::string& label, std::size_t n) {
+    std::cout << "---- Fenwick build: " << label << " ----\n\n";
+    Lcg rng(7000ULL + n);
+    const std::vector<double> values = makeValues(rng, n);
+
+    // Correctness first: both builds must answer the same prefix sums.
+    const FenwickTree linear(values);
+    FenwickTree byAdds(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        byAdds.add(i, values[i]);
+    }
+    bool ok = true;
+    for (std::size_t k = 0; k <= n; k += (n / 50U) + 1U) {
+        ok = ok && boxbox::nearlyEqual(linear.prefixSum(k), byAdds.prefixSum(k), 1e-6);
+    }
+    ok = ok && boxbox::nearlyEqual(linear.prefixSum(n), byAdds.prefixSum(n), 1e-6);
+
+    const double linearMs = medianMillis([&] {
+        const FenwickTree t(values);
+        g_sink = t.prefixSum(n);
+    });
+    const double addsMs = medianMillis([&] {
+        FenwickTree t(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            t.add(i, values[i]);
+        }
+        g_sink = t.prefixSum(n);
+    });
+    report("Fenwick Tree Build", n, 1, ok, "O(N) linear build", "N point adds, O(N log N)",
+           linearMs, addsMs);
+    return ok;
+}
+
+/// Segment tree point update + range minimum against a plain array, which
+/// updates in O(1) but scans O(N) for a minimum.
+bool benchSegmentUpdates(const std::string& label, std::size_t n, std::size_t opCount) {
+    std::cout << "---- segment tree update + min: " << label << " ----\n\n";
+    Lcg rng(8000ULL + n);
+    const std::vector<double> values = makeValues(rng, n);
+    const std::vector<Query> ops = makeQueries(rng, n, opCount);
+
+    // Correctness first: replay the mix on both and compare every minimum.
+    bool ok = true;
+    {
+        SegmentTree tree(values);
+        std::vector<double> ref = values;
+        for (std::size_t i = 0; i < ops.size(); ++i) {
+            const Query& q = ops[i];
+            if (i % 2U == 0U) {
+                tree.update(q.begin, 70.0 + static_cast<double>(i % 17U));
+                ref[q.begin] = 70.0 + static_cast<double>(i % 17U);
+            } else {
+                ok = ok && boxbox::nearlyEqual(tree.rangeMin(q.begin, q.end), bruteMin(ref, q), 0.0);
+            }
+        }
+    }
+
+    SegmentTree tree(values);
+    std::vector<double> plain = values;
+    const double treeMs = medianMillis([&] {
+        double s = 0.0;
+        for (std::size_t i = 0; i < ops.size(); ++i) {
+            const Query& q = ops[i];
+            if (i % 2U == 0U) {
+                tree.update(q.begin, 70.0 + static_cast<double>(i % 17U));
+            } else {
+                s += tree.rangeMin(q.begin, q.end);
+            }
+        }
+        g_sink = s;
+    });
+    const double plainMs = medianMillis([&] {
+        double s = 0.0;
+        for (std::size_t i = 0; i < ops.size(); ++i) {
+            const Query& q = ops[i];
+            if (i % 2U == 0U) {
+                plain[q.begin] = 70.0 + static_cast<double>(i % 17U);
+            } else {
+                s += bruteMin(plain, q);
+            }
+        }
+        g_sink = s;
+    });
+    report("Segment Tree Update + Range Min (50/50 mix)", n, opCount, ok,
+           "O(log N) update, O(log N) min", "Plain array, O(1) update and O(N) min", treeMs,
+           plainMs);
+    return ok;
+}
+
+/// Threshold queries: binary search (profile never falls) against the O(M)
+/// scan it replaces. The profile is synthetic, a monotone wear curve, so the
+/// binary-search path is the one taken.
+bool benchThreshold(const std::string& label, std::size_t ages, std::size_t queryCount) {
+    std::cout << "---- threshold query: " << label << " ----\n\n";
+    Lcg rng(9000ULL + ages);
+    std::vector<double> lapTimes(ages);
+    double lap = 88.0;
+    for (double& x : lapTimes) {
+        lap += static_cast<double>(rng.next() % 1000U) / 100000.0;  // never falls
+        x = lap;
+    }
+    const boxbox::DegradationProfile profile =
+        boxbox::DegradationProfile::fromLapTimes("synthetic", lapTimes);
+    const double top = profile.degradationVsFresh().back();
+    std::vector<double> limits(queryCount);
+    for (double& limit : limits) {
+        limit = top * (static_cast<double>(rng.next() % 1200U) / 1000.0) - 0.05;
+    }
+
+    const auto scan = [&](double limit) -> int {
+        const std::vector<double>& d = profile.degradationVsFresh();
+        for (std::size_t a = 0; a < d.size(); ++a) {
+            if (boxbox::definitelyLess(limit, d[a])) {
+                return static_cast<int>(a);
+            }
+        }
+        return -1;
+    };
+
+    // Correctness first: same answer from both, and the fast path really ran.
+    bool ok = profile.lapTimeNonDecreasing();
+    for (const double limit : limits) {
+        const boxbox::ThresholdResult r = boxbox::firstAgeDegradationExceeds(profile, limit);
+        ok = ok && r.usedBinarySearch && (r.value ? *r.value : -1) == scan(limit);
+    }
+
+    const double binaryMs = medianMillis([&] {
+        double s = 0.0;
+        for (const double limit : limits) {
+            const boxbox::ThresholdResult r = boxbox::firstAgeDegradationExceeds(profile, limit);
+            s += r.value ? static_cast<double>(*r.value) : -1.0;
+        }
+        g_sink = s;
+    });
+    const double scanMs = medianMillis([&] {
+        double s = 0.0;
+        for (const double limit : limits) {
+            s += static_cast<double>(scan(limit));
+        }
+        g_sink = s;
+    });
+    report("Degradation Threshold Query", ages, queryCount, ok, "O(log M) binary search",
+           "Linear scan, O(M)", binaryMs, scanMs);
+    return ok;
+}
+
 /// O(D^2) reference: compare every pair, with start positions looked up once.
 std::int64_t bruteSwaps(const std::vector<int>& before, const std::vector<int>& after) {
     std::vector<std::size_t> start(after.size());
@@ -282,6 +431,12 @@ int main() {
     ok = benchSize("small", 1000, 5000) && ok;
     ok = benchSize("medium", 10000, 20000) && ok;
     ok = benchSize("large", 100000, 50000) && ok;
+    ok = benchFenwickBuild("1,000 values", 1000) && ok;
+    ok = benchFenwickBuild("100,000 values", 100000) && ok;
+    ok = benchSegmentUpdates("1,000 values", 1000, 5000) && ok;
+    ok = benchSegmentUpdates("100,000 values", 100000, 20000) && ok;
+    ok = benchThreshold("real stint (45 ages)", 45, 5000) && ok;
+    ok = benchThreshold("100,000 ages", 100000, 5000) && ok;
     ok = benchSwaps("a real field (20 cars)", 20) && ok;
     ok = benchSwaps("1,000 cars", 1000) && ok;
     ok = benchSwaps("20,000 cars", 20000) && ok;
