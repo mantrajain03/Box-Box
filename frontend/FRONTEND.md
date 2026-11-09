@@ -278,6 +278,18 @@ K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
 - Cars are drawn side by side across the track so identical plans (the optimal car and the all-soft reference share
   one) stay visible. The Follow selector and a leaderboard click both set the focused car, which zooms the camera.
 
+**Phase E (Strategy Lab) is built.**
+- `strategy.scenarios` holds one full scenario per pit loss on the sweep (and the race's own pit loss if it is off the
+  grid), sorted: the optimal plan, the DP trace with its backtrack, the best plan per stop count, and a brute-force
+  check. The slider snaps to these; every value is a separate optimizer run in C++, nothing is interpolated.
+- The DP visualiser steps through `dp[0..N]` (one step per cell) and then the backtrack (one step per stint). For each
+  cell it shows the best candidate per compound and the three exported numbers that add up to the cell's cost
+  (`dp[from]`, `stintCost[c][l]` from the prefix-sum table, and the pit loss).
+- The race-length selector from section 4.3 is not built. The bundle holds one race length, and a length scenario needs
+  its own full set of traces. Re-run `boxbox --laps N export` to look at another length.
+- The brute-force check is exported without timings (they would break byte-identical output), so the page shows the
+  agreement but not a runtime comparison. Timings belong on the Algorithms page with the benchmarks.
+
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.
 - Commit `frontend/data/` or gitignore it (generated).

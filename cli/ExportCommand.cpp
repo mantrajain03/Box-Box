@@ -666,6 +666,108 @@ bool writeRun(JsonWriter& json, const PitStrategy& strategy, const OvertakeRule&
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Strategy blocks shared by the base race and every pit-loss scenario
+// ---------------------------------------------------------------------------
+
+/// Writes the keys "dp" and "backtrack". The trace is only worth showing if it IS
+/// the optimizer's recurrence, so it is checked against `optimal` first.
+bool writeDpAndBacktrack(JsonWriter& json, const PitStrategy& strategy,
+                         const StrategyResult& optimal, std::string& failure) {
+    json.key("dp");
+    const TraceOutcome trace = writeDpTrace(json, strategy);
+
+    if (!nearlyEqual(trace.finalValue, optimal.dpValue)) {
+        failure = "DP trace ends at " + std::to_string(trace.finalValue) +
+                  " but PitStrategy::optimize() reports dp[N] = " + std::to_string(optimal.dpValue);
+        return false;
+    }
+    if (trace.plan.size() != optimal.stints.size()) {
+        failure = "DP trace backtracks to a different number of stints than optimize()";
+        return false;
+    }
+    for (std::size_t i = 0; i < trace.plan.size(); ++i) {
+        if (trace.plan[i].compoundIndex != optimal.stints[i].compoundIndex ||
+            trace.plan[i].laps != optimal.stints[i].laps) {
+            failure = "DP trace backtracks to a different plan than optimize()";
+            return false;
+        }
+    }
+    json.key("backtrack");
+    writePlan(json, trace.plan);
+    return true;
+}
+
+/// The array of best-per-stop-count results (the caller writes the key).
+void writeStopCounts(JsonWriter& json, const std::vector<StopCountResult>& stopCounts) {
+    json.beginArray();
+    for (const StopCountResult& result : stopCounts) {
+        json.beginObject()
+            .key("stops").integer(result.stops)
+            .key("feasible").boolean(result.feasible)
+            .key("reason").string(result.reason);
+        json.key("report");
+        writeReport(json, result.report);
+        json.endObject();
+    }
+    json.endArray();
+}
+
+/// Brute force on a short copy of the race: same pit loss, same compounds. Writes
+/// the result object (the caller writes the key); false if the two disagree.
+bool writeVerification(JsonWriter& json, const PitStrategy& strategy, std::string& failure) {
+    Track shortTrack = strategy.track();
+    shortTrack.setTotalLaps(std::min(strategy.track().totalLaps(), kVerificationLaps));
+    const PitStrategy shortStrategy(shortTrack, strategy.compounds());
+    const StrategyResult dpShort = shortStrategy.optimize();
+    const double reference = bruteForceBest(shortStrategy, shortTrack.totalLaps(), true);
+
+    const double gap = dpShort.totalTime - reference;
+    if (!dpShort.feasible || !isReachable(reference) || std::fabs(gap) > kClosureTolerance) {
+        failure = "the DP and the brute-force reference disagree on a " +
+                  std::to_string(shortTrack.totalLaps()) + "-lap race";
+        return false;
+    }
+    json.beginObject()
+        .key("laps").integer(shortTrack.totalLaps())
+        .key("dpTotal").number(dpShort.totalTime)
+        .key("bruteForceTotal").number(reference)
+        .key("gap").number(gap)
+        .endObject();
+    return true;
+}
+
+/// One pit-loss scenario for the Strategy Lab: the optimizer's answer for that pit
+/// loss and everything the page animates for it. COST: one optimize(), one DP
+/// replay, one stop-count query and one brute-force check.
+bool writeScenario(JsonWriter& json, const Track& baseTrack, const std::vector<TireCompound>& compounds,
+                   double pitLoss, int maxStops, std::string& failure) {
+    Track track = baseTrack;
+    track.setPitLoss(pitLoss);
+    const PitStrategy strategy(track, compounds);
+    const StrategyResult optimal = strategy.optimize();
+    if (!optimal.feasible) {
+        failure = "no feasible strategy at pit loss " + std::to_string(pitLoss);
+        return false;
+    }
+
+    json.beginObject();
+    json.key("pitLoss").number(pitLoss);
+    json.key("optimal");
+    writeResult(json, optimal);
+    if (!writeDpAndBacktrack(json, strategy, optimal, failure)) {
+        return false;
+    }
+    json.key("stopCounts");
+    writeStopCounts(json, bestForStopCount(strategy, std::min(maxStops, track.totalLaps())));
+    json.key("verification");
+    if (!writeVerification(json, strategy, failure)) {
+        return false;
+    }
+    json.endObject();
+    return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -734,40 +836,12 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
     json.key("optimal");
     writeResult(json, optimal);
 
-    json.key("dp");
-    const TraceOutcome trace = writeDpTrace(json, strategy);
-
-    // The trace is only worth showing if it IS the optimizer's recurrence.
-    if (!nearlyEqual(trace.finalValue, optimal.dpValue)) {
-        failure = "DP trace ends at " + std::to_string(trace.finalValue) +
-                  " but PitStrategy::optimize() reports dp[N] = " + std::to_string(optimal.dpValue);
+    if (!writeDpAndBacktrack(json, strategy, optimal, failure)) {
         return false;
     }
-    if (trace.plan.size() != optimal.stints.size()) {
-        failure = "DP trace backtracks to a different number of stints than optimize()";
-        return false;
-    }
-    for (std::size_t i = 0; i < trace.plan.size(); ++i) {
-        if (trace.plan[i].compoundIndex != optimal.stints[i].compoundIndex ||
-            trace.plan[i].laps != optimal.stints[i].laps) {
-            failure = "DP trace backtracks to a different plan than optimize()";
-            return false;
-        }
-    }
-    json.key("backtrack");
-    writePlan(json, trace.plan);
 
-    json.key("stopCounts").beginArray();
-    for (const StopCountResult& result : stopCounts) {
-        json.beginObject()
-            .key("stops").integer(result.stops)
-            .key("feasible").boolean(result.feasible)
-            .key("reason").string(result.reason);
-        json.key("report");
-        writeReport(json, result.report);
-        json.endObject();
-    }
-    json.endArray();
+    json.key("stopCounts");
+    writeStopCounts(json, stopCounts);
 
     json.key("alternatives").beginArray();
     for (const StrategyReport& report : alternatives) {
@@ -793,28 +867,34 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
     json.endArray();
     json.endObject();
 
-    // Brute force on a short copy of the race: same pit loss, same compounds.
-    {
-        Track shortTrack = track;
-        shortTrack.setTotalLaps(std::min(track.totalLaps(), kVerificationLaps));
-        const PitStrategy shortStrategy(shortTrack, strategy.compounds());
-        const StrategyResult dpShort = shortStrategy.optimize();
-        const double reference = bruteForceBest(shortStrategy, shortTrack.totalLaps(), true);
+    json.key("verification");
+    if (!writeVerification(json, strategy, failure)) {
+        return false;
+    }
 
-        const double gap = dpShort.totalTime - reference;
-        if (!dpShort.feasible || !isReachable(reference) ||
-            std::fabs(gap) > kClosureTolerance) {
-            failure = "the DP and the brute-force reference disagree on a " +
-                      std::to_string(shortTrack.totalLaps()) + "-lap race";
+    // One full scenario per sweep value (and the race's own pit loss), so the Strategy
+    // Lab can move a slider through them with every figure coming from the engine.
+    std::vector<double> scenarioLosses;
+    for (const SweepRow& row : sweep.rows) {
+        scenarioLosses.push_back(row.value);
+    }
+    {
+        bool present = false;
+        for (const double value : scenarioLosses) {
+            present = present || nearlyEqual(value, track.pitLoss());
+        }
+        if (!present) {
+            scenarioLosses.push_back(track.pitLoss());
+        }
+        std::sort(scenarioLosses.begin(), scenarioLosses.end());
+    }
+    json.key("scenarios").beginArray();
+    for (const double pitLoss : scenarioLosses) {
+        if (!writeScenario(json, track, strategy.compounds(), pitLoss, maxStops, failure)) {
             return false;
         }
-        json.key("verification").beginObject()
-            .key("laps").integer(shortTrack.totalLaps())
-            .key("dpTotal").number(dpShort.totalTime)
-            .key("bruteForceTotal").number(reference)
-            .key("gap").number(gap)
-            .endObject();
     }
+    json.endArray();
 
     json.endObject();  // strategy
 

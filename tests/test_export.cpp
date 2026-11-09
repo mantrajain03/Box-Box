@@ -529,6 +529,95 @@ void testBundleMatchesOptimizer() {
     }
 }
 
+void testBundleScenarios() {
+    beginSection("Export bundle: one full scenario per pit loss");
+
+    const Track base = makeTrack(50, 22.0, {28.4, 31.2, 30.4});
+    const PitStrategy strategy(base, boxbox::defaultCompounds());
+    std::string failure;
+    const std::string text = bundleFor(strategy, failure);
+    Json root;
+    if (!parseJson(text, root)) {
+        XCHECK_MSG(false, "bundle is not valid JSON");
+        return;
+    }
+
+    try {
+        const Json& scenarios = root.at("strategy").at("scenarios");
+        XCHECK(scenarios.size() == 21U);  // 0..40 step 2 already contains the race's own 22 s
+
+        double previousLoss = -1.0;
+        double previousStops = 1.0e9;
+        bool hasBase = false;
+        for (std::size_t i = 0; i < scenarios.size(); ++i) {
+            const Json& s = scenarios.at(i);
+            const double pitLoss = s.at("pitLoss").number;
+            XCHECK_MSG(pitLoss > previousLoss, "scenarios must be sorted by pit loss");
+            previousLoss = pitLoss;
+
+            // The scenario IS the optimizer's answer at that pit loss.
+            Track track = base;
+            track.setPitLoss(pitLoss);
+            const PitStrategy independent(track, boxbox::defaultCompounds());
+            const boxbox::StrategyResult expected = independent.optimize();
+            const Json& optimal = s.at("optimal");
+            XCHECK_NEAR(optimal.at("totalTime").number, expected.totalTime, 1.0e-7);
+            XCHECK(static_cast<int>(optimal.at("stops").number + 0.5) == expected.stopCount());
+
+            // The DP trace ends at dp[N] and has one cell per lap plus lap 0.
+            const Json& dp = s.at("dp");
+            XCHECK(dp.size() == 51U);
+            XCHECK_NEAR(dp.at(50).at("cost").number, expected.dpValue, 1.0e-7);
+
+            // The backtrack tiles the race.
+            int planned = 0;
+            for (std::size_t b = 0; b < s.at("backtrack").size(); ++b) {
+                planned += static_cast<int>(s.at("backtrack").at(b).at("laps").number + 0.5);
+            }
+            XCHECK(planned == 50);
+
+            XCHECK(s.at("stopCounts").size() == 4U);
+            XCHECK_NEAR(s.at("verification").at("gap").number, 0.0, boxbox::kClosureTolerance);
+
+            // A dearer stop never means more stops.
+            const double stops = optimal.at("stops").number;
+            XCHECK_MSG(stops <= previousStops, "optimal stop count must not rise with pit loss");
+            previousStops = stops;
+
+            if (std::fabs(pitLoss - 22.0) < 1.0e-9) {
+                hasBase = true;
+                XCHECK_NEAR(optimal.at("totalTime").number,
+                            root.at("strategy").at("optimal").at("totalTime").number, 1.0e-7);
+            }
+        }
+        XCHECK(hasBase);
+    } catch (const std::exception& error) {
+        XCHECK_MSG(false, std::string("bundle is missing a field: ") + error.what());
+    }
+
+    // A pit loss that is not on the sweep grid is added, and the list stays sorted.
+    {
+        const PitStrategy offGrid(makeTrack(20, 21.3, {90.0}), boxbox::defaultCompounds());
+        std::string offFailure;
+        const std::string offText = bundleFor(offGrid, offFailure);
+        Json offRoot;
+        XCHECK_MSG(offFailure.empty(), offFailure);
+        XCHECK(parseJson(offText, offRoot));
+        if (offRoot.kind == Json::Kind::Object) {
+            const Json& list = offRoot.at("strategy").at("scenarios");
+            XCHECK(list.size() == 22U);
+            bool found = false;
+            for (std::size_t i = 0; i < list.size(); ++i) {
+                found = found || std::fabs(list.at(i).at("pitLoss").number - 21.3) < 1.0e-9;
+                if (i > 0U) {
+                    XCHECK(list.at(i).at("pitLoss").number > list.at(i - 1U).at("pitLoss").number);
+                }
+            }
+            XCHECK_MSG(found, "the race's own pit loss must be one of the scenarios");
+        }
+    }
+}
+
 void testBundleRaceRuns() {
     beginSection("Export bundle: race runs and events");
 
@@ -948,6 +1037,7 @@ ExportTestTally runExportTests() {
     testJsonWriter();
     testBundleStructure();
     testBundleMatchesOptimizer();
+    testBundleScenarios();
     testBundleRaceRuns();
     testTrackOutline();
     testBundleTimeline();

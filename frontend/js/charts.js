@@ -100,8 +100,9 @@
     });
     o.items.forEach(function (it, i) {
       const x = m.l + i * slot + slot * 0.15, w = slot * 0.7;
-      const y = Y(it.value), h = Math.max(H - m.b - y, it.value > 0 ? 1 : 0);
-      svg += '<rect class="bar" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + w.toFixed(1) +
+      // `nub` keeps a zero-height bar visible (the best choice has a delta of exactly 0).
+      const y = Y(it.value), h = Math.max(H - m.b - y, it.value > 0 ? 1 : (it.nub ? 3 : 0));
+      svg += '<rect class="bar" x="' + x.toFixed(1) + '" y="' + (it.nub && it.value <= 0 ? (H - m.b - h) : y).toFixed(1) + '" width="' + w.toFixed(1) +
              '" height="' + h.toFixed(1) + '" rx="2" fill="' + it.color + '" opacity="' + (it.active ? 1 : 0.55) + '">' +
              '<title>' + esc(it.title || (it.label + ': ' + it.value)) + '</title></rect>' +
              '<text x="' + (x + w / 2).toFixed(1) + '" y="' + (H - 10) + '" text-anchor="middle"' +
