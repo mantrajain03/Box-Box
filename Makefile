@@ -74,10 +74,14 @@ CORE_OBJ  := $(CORE_SRC:%.cpp=$(BUILD_DIR)/%.o)
 CLI_OBJ   := $(CLI_SRC:%.cpp=$(BUILD_DIR)/%.o)
 TEST_OBJ  := $(TEST_SRC:%.cpp=$(BUILD_DIR)/%.o)
 
+BENCH_SRC := $(wildcard benchmarks/*.cpp)
+BENCH_OBJ := $(BENCH_SRC:%.cpp=$(BUILD_DIR)/%.o)
+
 CLI_BIN   := $(BIN_DIR)/boxbox$(EXE)
 TEST_BIN  := $(BIN_DIR)/boxbox_tests$(EXE)
+BENCH_BIN := $(BIN_DIR)/boxbox_bench$(EXE)
 
-DEPS      := $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+DEPS      := $(CORE_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(BENCH_OBJ:.o=.d)
 
 # ---------------------------------------------------------------------------
 # Targets
@@ -109,6 +113,16 @@ $(TEST_BIN): $(CORE_OBJ) $(TEST_OBJ)
 test: $(TEST_BIN)
 	$(call exe_path,$(TEST_BIN))
 
+# Benchmarks (plan sec. 4.7). Kept apart from `make test` on purpose: timings
+# are never a pass/fail check, and the default build never compiles them.
+$(BENCH_BIN): $(CORE_OBJ) $(BENCH_OBJ)
+	@$(call mkdir_p,$(BIN_DIR))
+	$(CXX) $(CXXFLAGS) $(CORE_OBJ) $(BENCH_OBJ) -o $@ $(LDFLAGS)
+
+.PHONY: bench
+bench: $(BENCH_BIN)
+	$(call exe_path,$(BENCH_BIN))
+
 .PHONY: clean
 clean:
 	@$(call rmdir_r,$(BUILD_DIR))
@@ -135,6 +149,7 @@ help:
 	@echo Box Box - F1 Pit-Stop and Race Strategy Scheduler
 	@echo   make          Build the core library and the CLI. This is the default.
 	@echo   make test     Build and run the C++ assert harness
+	@echo   make bench    Build and run the algorithm benchmarks
 	@echo   make run      Build then run the CLI. Pass options via ARGS=...
 	@echo   make clean    Remove build/ and bin/
 	@echo   make info     Print the detected toolchain configuration
