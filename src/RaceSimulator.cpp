@@ -97,14 +97,17 @@ bool RaceSimulator::advanceLap() {
         return false;
     }
 
-    if (overtakeRule_.enabled) {
+        if (overtakeRule_.enabled) {
         advanceLapWithTraffic();
     } else {
         for (Driver& driver : drivers_) {
             if (driver.finished()) {
                 continue;
             }
+            const std::size_t stintBefore = driver.stintIndex();
+            const std::size_t compoundBefore = driver.currentCompoundIndex();
             driver.completeLap(lapTimeFor(driver), track_.pitLoss());
+            emitLapEvents(driver, stintBefore, compoundBefore);
         }
     }
 
@@ -156,7 +159,10 @@ void RaceSimulator::advanceLapWithTraffic() {
         // Pit loss, if this lap ends a stint, is charged inside completeLap. It
         // never reaches `crossing`, which is all the car behind is compared
         // against: the pit lane is not raced.
+        const std::size_t stintBefore = driver.stintIndex();
+        const std::size_t compoundBefore = driver.currentCompoundIndex();
         driver.completeLap(pace, track_.pitLoss(), delay);
+        emitLapEvents(driver, stintBefore, compoundBefore);
 
         haveAhead = true;
         aheadLaps = entry.lapsCompleted;
@@ -180,6 +186,49 @@ void RaceSimulator::reset() {
         driver.reset();
     }
     lapsRun_ = 0;
+}
+void RaceSimulator::emitLapEvents(const Driver& driver,
+                                   std::size_t stintIndexBefore,
+                                   std::size_t compoundIndexBefore) {
+    if (eventSink_ == nullptr) {
+        return;
+    }
+
+    RaceEvent lapEvent;
+    lapEvent.type = RaceEventType::LapCompleted;
+    lapEvent.timestamp = driver.cumulativeTime();
+    lapEvent.driverNumber = driver.number();
+    lapEvent.lap = driver.lapsCompleted();
+    eventSink_->push(lapEvent);
+
+    const bool stopped = driver.stintIndex() != stintIndexBefore;
+    if (stopped) {
+        RaceEvent pitEntry;
+        pitEntry.type = RaceEventType::PitEntry;
+        pitEntry.timestamp = driver.cumulativeTime();
+        pitEntry.driverNumber = driver.number();
+        pitEntry.lap = driver.lapsCompleted();
+        eventSink_->push(pitEntry);
+
+        RaceEvent compoundChange;
+        compoundChange.type = RaceEventType::CompoundChange;
+        compoundChange.timestamp = driver.cumulativeTime();
+        compoundChange.driverNumber = driver.number();
+        compoundChange.lap = driver.lapsCompleted();
+        compoundChange.oldCompoundIndex = static_cast<int>(compoundIndexBefore);
+        compoundChange.newCompoundIndex =
+            static_cast<int>(driver.currentCompoundIndex());
+        compoundChange.tireAgeAtEvent = driver.tireAge();
+        eventSink_->push(compoundChange);
+
+        RaceEvent pitExit;
+        pitExit.type = RaceEventType::PitExit;
+        pitExit.timestamp = driver.cumulativeTime();
+        pitExit.driverNumber = driver.number();
+        pitExit.lap = driver.lapsCompleted();
+        pitExit.tireAgeAtEvent = driver.tireAge();
+        eventSink_->push(pitExit);
+    }
 }
 
 // O(D).
