@@ -800,6 +800,197 @@ void testBundleTires() {
     }
 }
 
+void testBundleDriverAnalytics() {
+    beginSection("Export bundle: rankings, top laps, sectors, range queries, tree nodes");
+
+    const PitStrategy strategy(makeTrack(50, 22.0, {28.4, 31.2, 30.4}), boxbox::defaultCompounds());
+    std::string failure;
+    const std::string text = bundleFor(strategy, failure);
+    XCHECK_MSG(failure.empty(), failure);
+    Json root;
+    if (!parseJson(text, root)) {
+        XCHECK_MSG(false, "bundle is not valid JSON");
+        return;
+    }
+
+    try {
+        const std::size_t N = 50;
+
+        // --- structures: the nodes a query touches ---------------------------------
+        const Json& structures = root.at("structures");
+        XCHECK(structures.at("segmentNodes").size() == N);
+        XCHECK(structures.at("fenwickNodes").size() == N + 1U);
+        for (std::size_t b = 0; b < N; ++b) {
+            const Json& row = structures.at("segmentNodes").at(b);
+            XCHECK(row.size() == N - b);
+            for (std::size_t i = 0; i < row.size(); ++i) {
+                // The nodes lie inside [b + 1, b + i + 1] and together cover it exactly.
+                std::size_t covered = 0;
+                for (std::size_t k = 0; k < row.at(i).size(); ++k) {
+                    const double first = row.at(i).at(k).at(1).number, last = row.at(i).at(k).at(2).number;
+                    XCHECK(first >= static_cast<double>(b + 1U) && last <= static_cast<double>(b + i + 1U) && first <= last);
+                    covered += static_cast<std::size_t>(last - first + 1.5);
+                }
+                XCHECK(covered == i + 1U);
+                XCHECK_MSG(row.at(i).size() <= 12U, "a range needs at most 2 nodes per level");
+            }
+        }
+        for (std::size_t k = 0; k <= N; ++k) {
+            // A Fenwick prefix of k laps is covered exactly by disjoint nodes ending at k, k - lowbit(k), ...
+            const Json& nodes = structures.at("fenwickNodes").at(k);
+            std::size_t covered = 0, expectedEnd = k;
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                const std::size_t id = static_cast<std::size_t>(nodes.at(i).at(0).number + 0.5);
+                const std::size_t last = static_cast<std::size_t>(nodes.at(i).at(2).number + 0.5);
+                const std::size_t first = static_cast<std::size_t>(nodes.at(i).at(1).number + 0.5);
+                XCHECK(id == last && last == expectedEnd);
+                covered += last - first + 1U;
+                expectedEnd = first - 1U;
+            }
+            XCHECK(covered == k);
+        }
+
+        for (const char* name : {"overtakeOff", "overtakeOn"}) {
+            const Json& run = root.at("race").at("runs").at(name);
+            const Json& a = run.at("analytics");
+            const Json& cars = run.at("overview").at("windows").at("cars");
+            const std::size_t carCount = cars.size();
+            const bool trafficOn = run.at("overtake").at("enabled").boolean;
+
+            // Lap times by car, from the windows block (the same LapRecords).
+            std::vector<std::vector<double>> times(carCount + 1U);
+            std::vector<double> everyLap;
+            for (std::size_t c = 0; c < carCount; ++c) {
+                const std::size_t car = static_cast<std::size_t>(cars.at(c).at("car").number + 0.5);
+                for (std::size_t l = 0; l < cars.at(c).at("lapTimes").size(); ++l) {
+                    times[car].push_back(cars.at(c).at("lapTimes").at(l).number);
+                    everyLap.push_back(times[car].back());
+                }
+            }
+            const Json& overviewDrivers = run.at("overview").at("drivers");
+            const auto statOf = [&](std::size_t car, const std::string& metric) {
+                for (std::size_t i = 0; i < overviewDrivers.size(); ++i) {
+                    if (static_cast<std::size_t>(overviewDrivers.at(i).at("car").number + 0.5) != car) { continue; }
+                    if (metric == "bestLap") { return overviewDrivers.at(i).at("bestLap").at("time").number; }
+                    return overviewDrivers.at(i).at(metric).number;
+                }
+                return -1.0;
+            };
+
+            // --- rankings: a permutation of the cars, in non-decreasing order of the metric ---
+            for (const char* metric : {"averageLap", "bestLap", "lapRange", "meanAbsDeviation"}) {
+                const Json& order = a.at("rankings").at(metric);
+                XCHECK(order.size() == carCount);
+                std::vector<bool> seen(carCount + 1U, false);
+                for (std::size_t i = 0; i < order.size(); ++i) {
+                    const std::size_t car = static_cast<std::size_t>(order.at(i).number + 0.5);
+                    XCHECK(car >= 1U && car <= carCount && !seen[car]);
+                    seen[car] = true;
+                    if (i > 0U) {
+                        const std::size_t previous = static_cast<std::size_t>(order.at(i - 1U).number + 0.5);
+                        XCHECK_MSG(statOf(car, metric) >= statOf(previous, metric), std::string("ranking by ") + metric);
+                    }
+                }
+            }
+
+            // --- top laps: the K smallest and K largest lap times in the field ---
+            std::vector<double> sorted = everyLap;
+            std::sort(sorted.begin(), sorted.end());
+            for (const std::size_t k : {3U, 5U, 10U}) {
+                const Json& set = a.at("topLaps").at("field").at("k" + std::to_string(k));
+                XCHECK(set.at("fastest").size() == k && set.at("slowest").size() == k);
+                for (std::size_t i = 0; i < k; ++i) {
+                    XCHECK_NEAR(set.at("fastest").at(i).at("time").number, sorted[i], 1.0e-9);
+                    XCHECK_NEAR(set.at("slowest").at(i).at("time").number, sorted[sorted.size() - 1U - i], 1.0e-9);
+                    // A listed lap really is that car's lap.
+                    const std::size_t car = static_cast<std::size_t>(set.at("fastest").at(i).at("car").number + 0.5);
+                    const std::size_t lap = static_cast<std::size_t>(set.at("fastest").at(i).at("lap").number + 0.5);
+                    XCHECK_NEAR(times[car][lap - 1U], set.at("fastest").at(i).at("time").number, 1.0e-9);
+                }
+            }
+            for (std::size_t c = 0; c < a.at("topLaps").at("cars").size(); ++c) {
+                const Json& entry = a.at("topLaps").at("cars").at(c);
+                const std::size_t car = static_cast<std::size_t>(entry.at("car").number + 0.5);
+                std::vector<double> own = times[car];
+                std::sort(own.begin(), own.end());
+                for (std::size_t i = 0; i < 5U; ++i) {
+                    XCHECK_NEAR(entry.at("k5").at("fastest").at(i).at("time").number, own[i], 1.0e-9);
+                    XCHECK(static_cast<std::size_t>(entry.at("k5").at("fastest").at(i).at("car").number + 0.5) == car);
+                }
+            }
+
+            // --- sectors: modelled; the sectors add back to the lap ---
+            const Json& sectors = a.at("sectors");
+            XCHECK(sectors.at("modelled").boolean);
+            XCHECK(sectors.at("names").size() == 3U);
+            XCHECK(sectors.at("pairs").size() == carCount * (carCount - 1U));
+            for (std::size_t c = 0; c < sectors.at("cars").size(); ++c) {
+                const Json& s = sectors.at("cars").at(c);
+                double total = 0.0;
+                for (std::size_t k = 0; k < s.at("average").size(); ++k) { total += s.at("average").at(k).number; }
+                XCHECK_NEAR(total, statOf(static_cast<std::size_t>(s.at("car").number + 0.5), "averageLap"), 1.0e-6);
+            }
+            for (std::size_t p = 0; p < sectors.at("pairs").size(); ++p) {
+                const Json& rows = sectors.at("pairs").at(p).at("rows");
+                XCHECK(rows.size() == 3U);
+                for (std::size_t r = 0; r < rows.size(); ++r) {
+                    XCHECK_NEAR(rows.at(r).at("averageGap").number,
+                                rows.at(r).at("averageA").number - rows.at(r).at("averageB").number, 1.0e-9);
+                }
+            }
+
+            // --- ranges: every (first lap, last lap) against a plain scan ---
+            const Json& ranges = a.at("ranges").at("cars");
+            XCHECK(ranges.size() == carCount);
+            for (std::size_t c = 0; c < ranges.size(); ++c) {
+                const std::size_t car = static_cast<std::size_t>(ranges.at(c).at("car").number + 0.5);
+                // Per-lap traffic from the cumulative figure on each lap row.
+                std::vector<double> cumulative(1U, 0.0);
+                for (std::size_t l = 0; l < run.at("laps").size(); ++l) {
+                    const Json& order = run.at("laps").at(l).at("order");
+                    for (std::size_t p = 0; p < order.size(); ++p) {
+                        if (static_cast<std::size_t>(order.at(p).at("car").number + 0.5) == car) {
+                            cumulative.push_back(order.at(p).at("traffic").number);
+                        }
+                    }
+                }
+                XCHECK(trafficOn == (ranges.at(c).at("traffic").kind == Json::Kind::Array));
+                for (std::size_t b = 0; b < N; ++b) {
+                    double sum = 0.0, lowest = boxbox::kUnreachable;
+                    std::size_t lowestLap = b + 1U;
+                    for (std::size_t e = b + 1U; e <= N; ++e) {
+                        sum += times[car][e - 1U];
+                        if (times[car][e - 1U] < lowest) { lowest = times[car][e - 1U]; lowestLap = e; }
+                        const std::size_t i = e - b - 1U;
+                        XCHECK_NEAR(ranges.at(c).at("sum").at(b).at(i).number, sum, 1.0e-7);
+                        XCHECK(static_cast<std::size_t>(ranges.at(c).at("fastestLap").at(b).at(i).number + 0.5) == lowestLap);
+                        if (trafficOn) {
+                            XCHECK_NEAR(ranges.at(c).at("traffic").at(b).at(i).number, cumulative[e] - cumulative[b], 1.0e-7);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& error) {
+        XCHECK_MSG(false, std::string("bundle is missing a field: ") + error.what());
+    }
+
+    // A race past the cap exports no range matrices and no node lists, and still validates.
+    {
+        const PitStrategy longRace(makeTrack(101, 22.0, {28.4, 31.2, 30.4}), boxbox::defaultCompounds());
+        std::string longFailure;
+        const std::string longText = bundleFor(longRace, longFailure);
+        Json longRoot;
+        XCHECK_MSG(longFailure.empty(), longFailure);
+        XCHECK(parseJson(longText, longRoot));
+        if (longRoot.kind == Json::Kind::Object) {
+            XCHECK(longRoot.at("structures").kind == Json::Kind::Null);
+            XCHECK(longRoot.at("race").at("runs").at("overtakeOff").at("analytics").at("ranges").kind == Json::Kind::Null);
+            XCHECK(longRoot.at("race").at("runs").at("overtakeOff").at("analytics").at("rankings").kind == Json::Kind::Object);
+        }
+    }
+}
+
 void testBundleRaceRuns() {
     beginSection("Export bundle: race runs and events");
 
@@ -1221,6 +1412,7 @@ ExportTestTally runExportTests() {
     testBundleMatchesOptimizer();
     testBundleScenarios();
     testBundleTires();
+    testBundleDriverAnalytics();
     testBundleRaceRuns();
     testTrackOutline();
     testBundleTimeline();

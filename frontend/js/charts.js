@@ -77,7 +77,7 @@
       // Marks (for example a degradation cliff): a triangle pointing at the point.
       (s.marks || []).forEach(function (mk) {
         const cx = X(mk[0]).toFixed(1), cy = Y(mk[1]);
-        svg += '<path d="M' + cx + ' ' + (cy - 3).toFixed(1) + 'l-6 -11h12z" fill="var(--yellow)" stroke="var(--bg)" stroke-width="1">' +
+        svg += '<path d="M' + cx + ' ' + (cy - 3).toFixed(1) + 'l-6 -11h12z" fill="' + (mk[3] || 'var(--yellow)') + '" stroke="var(--bg)" stroke-width="1">' +
                '<title>' + esc(mk[2] || '') + '</title></path>';
       });
     });

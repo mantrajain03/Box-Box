@@ -303,6 +303,21 @@ K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
 - Not built from section 4.4: the optimal stint-length analysis and the sensitivity to degradation parameters.
   `compoundSweep` already exists in the core, so this is an export addition when wanted.
 
+**Phase G (Drivers) is built.**
+- Each run carries `analytics`: `rankings` (`rankDrivers` for four metrics), `topLaps` (`selectLaps`, the bounded heap,
+  for K = 3, 5, 10, for the field and for each car), `sectors` (modelled; per-car stats, field bests, and
+  `compareSectors` for every ordered pair of cars) and `ranges` (for every car and every pair of laps: the segment
+  tree's total time and quickest lap, and the Fenwick tree's traffic loss, which is `null` with overtaking off).
+- `structures` lists the tree nodes a lap-range query touches, as `[id, firstLap, lastLap]`. The trees do not expose
+  their nodes, so the exporter replays the documented walks (iterative segment tree, Fenwick `i -= lowbit(i)`) and, before
+  writing, adds up the replayed nodes and compares with the real trees' answers for every range of every car.
+- Races longer than 100 laps export no range matrices or node lists (they hold one answer per pair of laps per car);
+  the page says so.
+- The sector comparison is a table, not grouped bars: sector times are a modelled split of each lap in proportion to the
+  track's sector times, so the gaps add no information beyond the lap gap, and the page labels them "Modelled, not measured".
+- Clicking a ranking row adds or removes that car, like the picker. Not built from section 4.5: "traffic after pit exits"
+  and "performance over race distance" as separate views (traffic lost is on the summary cards and in the range query).
+
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.
 - Commit `frontend/data/` or gitignore it (generated).

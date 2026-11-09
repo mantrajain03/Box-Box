@@ -20,6 +20,7 @@
 #include "boxbox/JsonWriter.hpp"
 #include "boxbox/PitAnalytics.hpp"
 #include "boxbox/RaceEvent.hpp"
+#include "boxbox/RaceLapAnalytics.hpp"
 #include "boxbox/RaceState.hpp"
 #include "boxbox/StrategyAnalytics.hpp"
 #include "boxbox/TireAnalytics.hpp"
@@ -713,6 +714,342 @@ void writeOverview(JsonWriter& json, const PitStrategy& strategy, const LapRecor
 }
 
 // ---------------------------------------------------------------------------
+// Driver analytics: rankings, top laps, sectors, and range queries
+// ---------------------------------------------------------------------------
+
+/// Races longer than this export no range-query matrices or tree node lists: they hold
+/// one answer per (first lap, last lap) pair, per car.
+constexpr int kMaxRangeLaps = 100;
+
+constexpr std::size_t kTopLapSizes[] = {3U, 5U, 10U};
+
+/// A tree node, as the page draws it: its id and the laps (1-based, inclusive) it covers.
+struct NodeRef {
+    std::size_t id = 0;
+    std::size_t firstLap = 0;
+    std::size_t lastLap = 0;
+};
+
+/// Which segment-tree nodes a range query touches. SegmentTree does not expose its
+/// nodes, but its layout is documented (iterative, bottom-up, leaves at n .. 2n-1,
+/// node i combines 2i and 2i+1) and rangeSum is the standard walk. This replays that
+/// walk; verifyTreeLayouts checks the result against the real tree's answers.
+class SegmentLayout {
+public:
+    explicit SegmentLayout(std::size_t n) : n_(n), lo_(2U * n, 0U), hi_(2U * n, 0U) {
+        for (std::size_t i = n; i < 2U * n; ++i) {
+            lo_[i] = hi_[i] = i - n;
+        }
+        for (std::size_t i = n; i-- > 1U;) {
+            lo_[i] = std::min(lo_[2U * i], lo_[2U * i + 1U]);
+            hi_[i] = std::max(hi_[2U * i], hi_[2U * i + 1U]);
+        }
+    }
+
+    /// The nodes whose sums add up to laps [begin, end), 0-based and half-open.
+    std::vector<NodeRef> nodes(std::size_t begin, std::size_t end) const {
+        std::vector<NodeRef> out;
+        for (std::size_t lo = begin + n_, hi = end + n_; lo < hi; lo /= 2U, hi /= 2U) {
+            if ((lo & 1U) != 0U) { out.push_back(ref(lo++)); }
+            if ((hi & 1U) != 0U) { out.push_back(ref(--hi)); }
+        }
+        return out;
+    }
+
+private:
+    NodeRef ref(std::size_t id) const { return NodeRef{id, lo_[id] + 1U, hi_[id] + 1U}; }
+
+    std::size_t n_;
+    std::vector<std::size_t> lo_;
+    std::vector<std::size_t> hi_;
+};
+
+/// The Fenwick nodes prefixSum(count) adds: i = count, then i minus its lowest set bit.
+/// Node i covers laps i - lowbit(i) + 1 .. i.
+std::vector<NodeRef> fenwickNodes(std::size_t count) {
+    std::vector<NodeRef> out;
+    for (std::size_t i = count; i > 0U; i -= (i & (~i + 1U))) {
+        const std::size_t low = i & (~i + 1U);
+        out.push_back(NodeRef{i, i - low + 1U, i});
+    }
+    return out;
+}
+
+void writeNodes(JsonWriter& json, const std::vector<NodeRef>& nodes) {
+    json.beginArray();
+    for (const NodeRef& node : nodes) {
+        json.beginArray()
+            .integer(static_cast<long long>(node.id))
+            .integer(static_cast<long long>(node.firstLap))
+            .integer(static_cast<long long>(node.lastLap))
+            .endArray();
+    }
+    json.endArray();
+}
+
+/// The `structures` section: which nodes of the segment tree and of the Fenwick tree a
+/// query over any lap range touches. They depend only on the race length.
+void writeStructures(JsonWriter& json, std::size_t n) {
+    json.beginObject();
+    json.key("raceLaps").integer(static_cast<long long>(n));
+
+    const SegmentLayout layout(n);
+    json.key("segmentNodes").beginArray();
+    for (std::size_t b = 0; b < n; ++b) {
+        json.beginArray();
+        for (std::size_t e = b + 1U; e <= n; ++e) {
+            writeNodes(json, layout.nodes(b, e));
+        }
+        json.endArray();
+    }
+    json.endArray();
+
+    json.key("fenwickNodes").beginArray();
+    for (std::size_t k = 0; k <= n; ++k) {
+        writeNodes(json, fenwickNodes(k));
+    }
+    json.endArray();
+
+    json.endObject();
+}
+
+/// Rebuild both trees from the same numbers the real ones were fed, add up the replayed
+/// nodes, and compare with what the real trees answer, for every lap range of every car.
+/// A node list that is wrong would give a different number, so agreement is evidence.
+bool verifyTreeLayouts(const std::vector<std::vector<double>>& lapTimes,
+                       const std::vector<std::vector<double>>& traffic,
+                       const RaceLapRecorder& lapIndex, std::string& failure) {
+    for (std::size_t car = 0; car < lapTimes.size(); ++car) {
+        const std::size_t n = lapTimes[car].size();
+        const SegmentLayout layout(n);
+
+        std::vector<double> sums(2U * n, 0.0);
+        for (std::size_t j = 0; j < n; ++j) { sums[n + j] = lapTimes[car][j]; }
+        for (std::size_t i = n; i-- > 1U;) { sums[i] = sums[2U * i] + sums[2U * i + 1U]; }
+
+        std::vector<double> fenwick(n + 1U, 0.0);
+        for (std::size_t lap = 1; lap <= n; ++lap) {
+            for (std::size_t i = lap; i <= n; i += (i & (~i + 1U))) { fenwick[i] += traffic[car][lap - 1U]; }
+        }
+        const auto prefix = [&](std::size_t count) {
+            double total = 0.0;
+            for (const NodeRef& node : fenwickNodes(count)) { total += fenwick[node.id]; }
+            return total;
+        };
+
+        for (std::size_t b = 0; b < n; ++b) {
+            for (std::size_t e = b + 1U; e <= n; ++e) {
+                double viaNodes = 0.0;
+                std::size_t covered = 0;
+                for (const NodeRef& node : layout.nodes(b, e)) {
+                    viaNodes += sums[node.id];
+                    covered += node.lastLap - node.firstLap + 1U;
+                }
+                const double real = lapIndex.carLaps(car).totalTime(static_cast<int>(b) + 1, static_cast<int>(e));
+                const double realTraffic = lapIndex.trafficLoss(car, static_cast<int>(b) + 1, static_cast<int>(e));
+                if (covered != e - b || std::fabs(viaNodes - real) > kClosureTolerance ||
+                    std::fabs(prefix(e) - prefix(b) - realTraffic) > kClosureTolerance) {
+                    failure = "the replayed tree nodes disagree with the real segment or Fenwick tree for car index " +
+                              std::to_string(car) + ", laps " + std::to_string(b + 1U) + " to " + std::to_string(e);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+void writeLapRef(JsonWriter& json, const LapRecord& lap) {
+    json.beginObject()
+        .key("car").integer(lap.driverNumber)
+        .key("lap").integer(lap.lap)
+        .key("time").number(lap.lapTime)
+        .key("compound").integer(static_cast<long long>(lap.compoundIndex))
+        .endObject();
+}
+
+/// The K fastest and K slowest laps from selectLaps, a bounded heap, optionally for one car.
+void writeTopSet(JsonWriter& json, const std::vector<LapRecord>& records, std::size_t k,
+                 const std::optional<int>& car) {
+    LapFilter filter;
+    filter.driverNumber = car;
+    json.beginObject();
+    json.key("fastest").beginArray();
+    for (const LapRecord& lap : selectLaps(records, k, LapOrder::Fastest, filter)) { writeLapRef(json, lap); }
+    json.endArray();
+    json.key("slowest").beginArray();
+    for (const LapRecord& lap : selectLaps(records, k, LapOrder::Slowest, filter)) { writeLapRef(json, lap); }
+    json.endArray();
+    json.endObject();
+}
+
+/// The `analytics` object of one run: rankings, top laps, modelled sector statistics and
+/// the per-car range-query answers. Everything is the core's own result.
+bool writeDriverAnalytics(JsonWriter& json, const PitStrategy& strategy, const LapRecorder& recorder,
+                          const RaceLapRecorder& lapIndex, const OvertakeRule& rule, std::string& failure) {
+    const DriverAnalytics analytics(recorder);
+    const std::vector<DriverSummary>& summaries = analytics.summaries();
+    const std::size_t raceLaps = static_cast<std::size_t>(strategy.track().totalLaps());
+
+    json.key("analytics").beginObject();
+
+    // Pace and consistency rankings: car numbers, best first, explicit tie-breaks.
+    json.key("rankings").beginObject();
+    const std::pair<const char*, RankMetric> metrics[] = {
+        {"averageLap", RankMetric::AverageLap}, {"bestLap", RankMetric::BestLap},
+        {"lapRange", RankMetric::LapRange}, {"meanAbsDeviation", RankMetric::MeanAbsDeviation}};
+    for (const auto& metric : metrics) {
+        json.key(metric.first).beginArray();
+        for (const int car : rankDrivers(summaries, metric.second)) { json.integer(car); }
+        json.endArray();
+    }
+    json.endObject();
+
+    // Fastest and slowest laps, for the field and for each car.
+    json.key("topLaps").beginObject();
+    json.key("sizes").beginArray();
+    for (const std::size_t k : kTopLapSizes) { json.integer(static_cast<long long>(k)); }
+    json.endArray();
+    json.key("field").beginObject();
+    for (const std::size_t k : kTopLapSizes) {
+        json.key("k" + std::to_string(k));
+        writeTopSet(json, analytics.records(), k, std::nullopt);
+    }
+    json.endObject();
+    json.key("cars").beginArray();
+    for (const DriverSummary& summary : summaries) {
+        json.beginObject().key("car").integer(summary.driverNumber);
+        for (const std::size_t k : kTopLapSizes) {
+            json.key("k" + std::to_string(k));
+            writeTopSet(json, analytics.records(), k, summary.driverNumber);
+        }
+        json.endObject();
+    }
+    json.endArray();
+    json.endObject();
+
+    // Sector statistics. MODELLED: the simulator times whole laps, and a lap is split in
+    // proportion to the track's sector times, so these add no information beyond lap times.
+    const std::vector<DriverSectorSummary> sectors = sectorSummaries(analytics);
+    bool anySectors = false;
+    for (const DriverSectorSummary& s : sectors) { anySectors = anySectors || s.available; }
+    json.key("sectors");
+    if (!anySectors) {
+        json.null();
+    } else {
+        json.beginObject();
+        json.key("modelled").boolean(true);
+        json.key("names").beginArray();
+        for (const Sector& sector : strategy.track().sectors()) { json.string(sector.name); }
+        json.endArray();
+        json.key("cars").beginArray();
+        for (std::size_t i = 0; i < sectors.size(); ++i) {
+            const DriverSectorSummary& s = sectors[i];
+            json.beginObject().key("car").integer(summaries[i].driverNumber).key("available").boolean(s.available);
+            json.key("fastest").beginArray();
+            for (const SectorBest& best : s.fastest) {
+                json.beginObject().key("lap").integer(best.lap).key("time").number(best.time).endObject();
+            }
+            json.endArray();
+            json.key("average");
+            writeNumbers(json, s.average);
+            json.key("bestCombinedLap").number(s.bestCombinedLap);
+            json.endObject();
+        }
+        json.endArray();
+        json.key("fieldBest").beginArray();
+        for (const FieldSectorBest& best : fieldBestSectors(analytics)) {
+            json.beginObject().key("car").integer(best.driverNumber).key("lap").integer(best.lap)
+                .key("time").number(best.time).endObject();
+        }
+        json.endArray();
+        json.key("fieldBestCombinedLap").number(fieldBestCombinedLap(analytics));
+        json.key("pairs").beginArray();
+        for (const DriverSummary& a : summaries) {
+            for (const DriverSummary& b : summaries) {
+                if (a.driverNumber == b.driverNumber) { continue; }
+                json.beginObject().key("a").integer(a.driverNumber).key("b").integer(b.driverNumber);
+                json.key("rows").beginArray();
+                for (const SectorComparisonRow& row : compareSectors(analytics, a.driverNumber, b.driverNumber)) {
+                    json.beginObject()
+                        .key("sector").integer(static_cast<long long>(row.sector))
+                        .key("fastestA").number(row.fastestA).key("fastestB").number(row.fastestB)
+                        .key("averageA").number(row.averageA).key("averageB").number(row.averageB)
+                        .key("averageGap").number(row.averageGap)
+                        .endObject();
+                }
+                json.endArray();
+                json.endObject();
+            }
+        }
+        json.endArray();
+        json.endObject();
+    }
+
+    // Range queries over laps, for every car: the segment tree's sum and quickest lap, and
+    // the Fenwick tree's traffic loss, for every (first lap, last lap).
+    json.key("ranges");
+    if (raceLaps > static_cast<std::size_t>(kMaxRangeLaps)) {
+        json.null();
+    } else {
+        std::vector<std::vector<double>> lapTimes;
+        std::vector<std::vector<double>> traffic;
+        for (const DriverSummary& summary : summaries) {
+            lapTimes.push_back(analytics.lapTimes(summary.driverNumber));
+            std::vector<double> perLap(raceLaps, 0.0);
+            for (const LapRecord& record : analytics.records()) {
+                if (record.driverNumber == summary.driverNumber) { perLap[static_cast<std::size_t>(record.lap - 1)] = record.trafficTime; }
+            }
+            traffic.push_back(perLap);
+        }
+        if (!verifyTreeLayouts(lapTimes, traffic, lapIndex, failure)) {
+            return false;
+        }
+
+        json.beginObject();
+        json.key("cars").beginArray();
+        for (std::size_t car = 0; car < summaries.size(); ++car) {
+            json.beginObject().key("car").integer(summaries[car].driverNumber);
+            const auto writeMatrix = [&](const char* name, auto query) {
+                json.key(name).beginArray();
+                for (std::size_t b = 0; b < raceLaps; ++b) {
+                    json.beginArray();
+                    for (std::size_t e = b + 1U; e <= raceLaps; ++e) { query(b, e); }
+                    json.endArray();
+                }
+                json.endArray();
+            };
+            writeMatrix("sum", [&](std::size_t b, std::size_t e) {
+                json.number(lapIndex.carLaps(car).totalTime(static_cast<int>(b) + 1, static_cast<int>(e)));
+            });
+            writeMatrix("fastestLap", [&](std::size_t b, std::size_t e) {
+                json.integer(lapIndex.carLaps(car).fastestLap(static_cast<int>(b) + 1, static_cast<int>(e)).lap);
+            });
+            json.key("traffic");
+            if (!rule.enabled) {
+                json.null();  // with overtaking off every loss is exactly zero
+            } else {
+                json.beginArray();
+                for (std::size_t b = 0; b < raceLaps; ++b) {
+                    json.beginArray();
+                    for (std::size_t e = b + 1U; e <= raceLaps; ++e) {
+                        json.number(lapIndex.trafficLoss(car, static_cast<int>(b) + 1, static_cast<int>(e)));
+                    }
+                    json.endArray();
+                }
+                json.endArray();
+            }
+            json.endObject();
+        }
+        json.endArray();
+        json.endObject();
+    }
+
+    json.endObject();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Race replay
 // ---------------------------------------------------------------------------
 
@@ -738,6 +1075,7 @@ bool writeRun(JsonWriter& json, const PitStrategy& strategy, const OvertakeRule&
     }
 
     LapRecorder recorder(simulator);  // watches from the grid, before lap 1
+    RaceLapRecorder lapIndex(simulator);  // the segment and Fenwick trees over each car's laps
 
     json.beginObject();
 
@@ -783,6 +1121,7 @@ bool writeRun(JsonWriter& json, const PitStrategy& strategy, const OvertakeRule&
             break;
         }
         recorder.observe(simulator);
+        lapIndex.observe(simulator);
 
         json.beginObject();
         json.key("lap").integer(simulator.lapsRun());
@@ -829,6 +1168,9 @@ bool writeRun(JsonWriter& json, const PitStrategy& strategy, const OvertakeRule&
 
     json.key("eventLogValid").boolean(true);
     writeOverview(json, strategy, recorder, log);
+    if (!writeDriverAnalytics(json, strategy, recorder, lapIndex, rule, failure)) {
+        return false;
+    }
     json.key("events").beginArray();
     for (const RaceEvent& event : log.entries()) {
         json.beginObject();
@@ -1124,6 +1466,14 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
     json.key("tires");
     if (!writeTires(json, strategy, failure)) {
         return false;
+    }
+
+    // Which tree nodes a lap-range query touches (depends only on the race length).
+    json.key("structures");
+    if (track.totalLaps() > kMaxRangeLaps) {
+        json.null();
+    } else {
+        writeStructures(json, static_cast<std::size_t>(track.totalLaps()));
     }
 
     // --- race ---------------------------------------------------------------
