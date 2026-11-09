@@ -10,6 +10,7 @@
 #include "boxbox/PitStrategy.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
+#include "boxbox/EventPriorityQueue.hpp"
 
 namespace boxbox {
 
@@ -110,6 +111,8 @@ public:
 
     bool finished() const noexcept;
 
+    void setEventSink(EventPriorityQueue* sink) noexcept { eventSink_ = sink; }
+
     /// FR-5. The time the next lap will take for `driver`, computed from THAT
     /// driver's own compound and its own tire age - never a flat track lap
     /// time. This is the project's only implementation of PRD sec. 3.2 beyond
@@ -146,11 +149,15 @@ public:
     /// its own queries over the same data.
     std::vector<LeaderboardEntry> snapshotEntries() const;
 
+    
+
 private:
     void validatePlan(const std::vector<Stint>& plan) const;
 
     /// One lap under the FR-9 rule. O(D log D).
     void advanceLapWithTraffic();
+    void emitLapEvents(const Driver& driver, std::size_t stintIndexBefore,
+                        std::size_t compoundIndexBefore);
 
     /// Turn an already-ordered entry list into positions and gaps. O(D).
     std::vector<Standing> toStandings(const std::vector<LeaderboardEntry>& ordered) const;
@@ -160,6 +167,7 @@ private:
     std::vector<Driver> drivers_;
     OvertakeRule overtakeRule_;
     int lapsRun_ = 0;
+    EventPriorityQueue* eventSink_ = nullptr;
 };
 
 }  // namespace boxbox
