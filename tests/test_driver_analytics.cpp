@@ -98,6 +98,8 @@ std::string describe(double actual, double expected, double tolerance) {
 
 #define DCHECK(expr) reportCheck((expr), #expr, __FILE__, __LINE__, std::string())
 
+#define DCHECK_MSG(expr, detail) reportCheck((expr), #expr, __FILE__, __LINE__, (detail))
+
 #define DCHECK_NEAR(actual, expected, tolerance)                                        \
     reportCheck(std::fabs((actual) - (expected)) <= (tolerance),                        \
                 #actual " ~= " #expected, __FILE__, __LINE__,                           \
@@ -976,6 +978,12 @@ void testAnalyticsValidation() {
     DCHECK(broken([](std::vector<LapRecord>& r) { r[0].position = 0; }));
     DCHECK(broken([](std::vector<LapRecord>& r) { r[0].position = 2; }));  // one car in the field
     DCHECK(broken([](std::vector<LapRecord>& r) { r[0].tireAge = -1; }));
+    // The lap time includes traffic, so traffic cannot be larger than the lap.
+    DCHECK(broken([](std::vector<LapRecord>& r) { r[0].trafficTime = 95.0; }));
+    DCHECK(!broken([](std::vector<LapRecord>& r) { r[0].trafficTime = 90.0; }));  // all of it
+    // A window past MonotonicDeque::kMaxWindow is refused up front, not by the allocator.
+    DCHECK_THROWS(MonotonicDeque(MonotonicDeque::kMaxWindow + 1U, MonotonicDeque::Kind::Minimum),
+                  std::invalid_argument);
     // The legal version: a stop with a zero pit loss, then new tires in stint 1.
     DCHECK(!broken([](std::vector<LapRecord>& r) {
         r[0].pitStop = true;
@@ -1340,6 +1348,315 @@ void testDeterminism() {
     DCHECK(topSame);
 }
 
+void testMonotonicDequeLarge() {
+    beginSection("MonotonicDeque: 100,000-value streams against a brute-force scan, and clear()");
+
+    Lcg rng(8642ULL);
+    std::vector<double> values(100000);
+    for (double& v : values) v = static_cast<double>(rng.nextInt(0, 4000));   // many exact ties
+
+    for (const std::size_t window : {std::size_t{1}, std::size_t{2}, std::size_t{7}, std::size_t{300},
+                                     std::size_t{100000}, std::size_t{150000}}) {
+        MonotonicDeque low(window, MonotonicDeque::Kind::Minimum);
+        MonotonicDeque high(window, MonotonicDeque::Kind::Maximum);
+        // The O(L*W) reference is only run where it is affordable; the two big windows are
+        // checked against a running extreme instead (W >= L means the window is the whole stream).
+        const bool scan = window <= 300U;
+        bool agree = true;
+        double runningLow = values[0];
+        double runningHigh = values[0];
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            low.push(values[i]);
+            high.push(values[i]);
+            runningLow = std::min(runningLow, values[i]);
+            runningHigh = std::max(runningHigh, values[i]);
+            if (scan) {
+                const std::size_t from = i + 1U > window ? i + 1U - window : 0U;
+                double lo = values[from];
+                double hi = values[from];
+                std::size_t loIndex = from;
+                std::size_t hiIndex = from;
+                for (std::size_t j = from + 1U; j <= i; ++j) {
+                    if (values[j] < lo) { lo = values[j]; loIndex = j; }
+                    if (values[j] > hi) { hi = values[j]; hiIndex = j; }
+                }
+                agree = agree && low.extreme() == lo && high.extreme() == hi &&
+                        low.extremeIndex() == loIndex && high.extremeIndex() == hiIndex;   // earliest on ties
+            } else {
+                agree = agree && low.extreme() == runningLow && high.extreme() == runningHigh;
+            }
+            agree = agree && low.size() >= 1U && low.size() <= std::min(window, i + 1U);
+        }
+        DCHECK_MSG(agree, "window " + std::to_string(window));
+        DCHECK(low.pushed() == values.size());
+    }
+
+    // clear() forgets the stream but keeps the window and kind.
+    MonotonicDeque dq(3, MonotonicDeque::Kind::Minimum);
+    for (const double v : {5.0, 1.0, 4.0, 2.0}) dq.push(v);
+    DCHECK_NEAR(dq.extreme(), 1.0, 0.0);
+    dq.clear();
+    DCHECK(dq.empty() && dq.pushed() == 0U && dq.window() == 3U);
+    DCHECK_THROWS(dq.extreme(), std::out_of_range);
+    dq.push(9.0);
+    dq.push(8.0);
+    DCHECK_NEAR(dq.extreme(), 8.0, 0.0);
+    DCHECK(dq.extremeIndex() == 1U);
+}
+
+// ---------------------------------------------------------------------------
+// Sector analytics: a MODELLED split of each lap
+// ---------------------------------------------------------------------------
+
+/// A record carrying explicit sector times, for the arithmetic checks.
+LapRecord sectorLap(int car, int lap, std::initializer_list<double> sectors) {
+    LapRecord r = lapOf(car, lap, 0.0);
+    r.sectorTimes = sectors;
+    for (const double s : r.sectorTimes) {
+        r.lapTime += s;
+    }
+    return r;
+}
+
+void testModelledSplit() {
+    beginSection("modelledSectorTimes and the recorder's sector split");
+
+    Track track("T", 5, 10.0);
+    track.addSector("S1", 20.0);
+    track.addSector("S2", 30.0);
+    track.addSector("S3", 50.0);
+    const std::vector<double> split = boxbox::modelledSectorTimes(track, 90.0);  // 100 s of base
+    DCHECK(split.size() == 3U);
+    if (split.size() == 3U) {
+        DCHECK_NEAR(split[0], 18.0, 1e-12);
+        DCHECK_NEAR(split[1], 27.0, 1e-12);
+        DCHECK_NEAR(split[2], 45.0, 1e-12);
+        DCHECK_NEAR(split[0] + split[1] + split[2], 90.0, 1e-12);
+    }
+    // Any lap time, including a slow one: the parts always add back to it.
+    for (const double lap : {0.0, 61.7, 100.0, 133.333}) {
+        double sum = 0.0;
+        for (const double part : boxbox::modelledSectorTimes(track, lap)) sum += part;
+        DCHECK_NEAR(sum, lap, 1e-9);
+    }
+
+    Track none("N", 5, 10.0);
+    DCHECK(boxbox::modelledSectorTimes(none, 90.0).empty());     // no sectors
+    Track zero("Z", 5, 10.0);
+    zero.addSector("S1", 0.0);
+    DCHECK(boxbox::modelledSectorTimes(zero, 90.0).empty());     // base lap time 0
+
+    // Through the recorder, on a real race: count, sign and sum.
+    const std::vector<TireCompound> compounds{TireCompound("A", 0.0, 0.1, 5), TireCompound("B", 0.5, 0.0, 5)};
+    const PitStrategy strategy(track, compounds);
+    RaceSimulator sim(track, compounds);
+    sim.setOvertakeRule(boxbox::OvertakeRule{true, 0.5, 1.0});
+    sim.addDriver(1, "ONE", strategy.optimize());
+    sim.addDriver(2, "TWO", strategy.singleCompoundPlan(1));
+    const LapRecorder recorder = recordRace(sim);
+    DCHECK(!recorder.records().empty());
+    bool shaped = true;
+    bool adds = true;
+    for (const LapRecord& r : recorder.records()) {
+        shaped = shaped && r.sectorTimes.size() == 3U;
+        double sum = 0.0;
+        for (const double s : r.sectorTimes) {
+            shaped = shaped && s >= 0.0;
+            sum += s;
+        }
+        adds = adds && std::fabs(sum - r.lapTime) <= 1e-9;
+    }
+    DCHECK(shaped);
+    DCHECK(adds);
+    const DriverAnalytics analytics(recorder);        // validation accepts what the recorder wrote
+    DCHECK(analytics.summaries().size() == 2U);
+
+    // A sector-less track records none, and the analytics says so.
+    Track bare("Bare", 3, 5.0);
+    const PitStrategy bareStrategy(bare, compounds);
+    RaceSimulator bareSim(bare, compounds);
+    bareSim.addDriver(1, "ONE", bareStrategy.optimize());
+    const LapRecorder bareRecorder = recordRace(bareSim);
+    for (const LapRecord& r : bareRecorder.records()) DCHECK(r.sectorTimes.empty());
+}
+
+void testSectorArithmetic() {
+    beginSection("Sector analytics: hand case, validation, and missing data");
+
+    const std::vector<LapRecord> records{
+        sectorLap(1, 1, {10.0, 20.0, 30.0}), sectorLap(2, 1, {12.0, 18.0, 31.0}),
+        sectorLap(1, 2, {9.0, 21.0, 30.0}),  sectorLap(2, 2, {12.0, 19.0, 30.0}),
+        sectorLap(1, 3, {11.0, 19.0, 30.0}), sectorLap(2, 3, {13.0, 20.0, 33.0})};
+    std::vector<LapRecord> placed = records;
+    for (LapRecord& r : placed) r.position = r.driverNumber;
+    const DriverAnalytics analytics({1, 2}, placed);
+
+    const std::vector<boxbox::DriverSectorSummary> sums = boxbox::sectorSummaries(analytics);
+    DCHECK(sums.size() == 2U && sums[0].available && sums[1].available);
+    // Car 1: fastest 9 (lap 2), 19 (lap 3), 30 (lap 1, an exact tie keeps the earliest lap).
+    DCHECK(sums[0].fastest.size() == 3U);
+    DCHECK(sums[0].fastest[0].lap == 2 && std::fabs(sums[0].fastest[0].time - 9.0) <= 1e-12);
+    DCHECK(sums[0].fastest[1].lap == 3 && std::fabs(sums[0].fastest[1].time - 19.0) <= 1e-12);
+    DCHECK(sums[0].fastest[2].lap == 1 && std::fabs(sums[0].fastest[2].time - 30.0) <= 1e-12);
+    DCHECK_NEAR(sums[0].average[0], 10.0, 1e-12);
+    DCHECK_NEAR(sums[0].average[1], 20.0, 1e-12);
+    DCHECK_NEAR(sums[0].average[2], 30.0, 1e-12);
+    DCHECK_NEAR(sums[0].bestCombinedLap, 58.0, 1e-12);       // 9 + 19 + 30
+    DCHECK_NEAR(sums[1].bestCombinedLap, 12.0 + 18.0 + 30.0, 1e-12);
+
+    // Field: best 9 (car 1, lap 2), 18 (car 2, lap 1), 30 (car 1, lap 1: tie with car 2's lap 2).
+    const std::vector<boxbox::FieldSectorBest> field = boxbox::fieldBestSectors(analytics);
+    DCHECK(field.size() == 3U);
+    if (field.size() == 3U) {
+        DCHECK(field[0].driverNumber == 1 && field[0].lap == 2);
+        DCHECK(field[1].driverNumber == 2 && field[1].lap == 1);
+        DCHECK(field[2].driverNumber == 1 && field[2].lap == 1);
+    }
+    DCHECK_NEAR(boxbox::fieldBestCombinedLap(analytics), 9.0 + 18.0 + 30.0, 1e-12);
+
+    // Distribution of the last sector: 30 30 30 31 30 33 -> min 30, max 33.
+    const boxbox::SectorDistribution d = boxbox::sectorDistribution(analytics, 2, 3);
+    DCHECK(d.count == 6);
+    DCHECK_NEAR(d.minimum, 30.0, 1e-12);
+    DCHECK_NEAR(d.maximum, 33.0, 1e-12);
+    DCHECK_NEAR(d.mean, (30.0 + 31.0 + 30.0 + 30.0 + 30.0 + 33.0) / 6.0, 1e-12);
+    DCHECK(d.histogram.size() == 3U);
+    DCHECK(d.histogram.size() == 3U && d.histogram[0] == 4 && d.histogram[1] == 1 && d.histogram[2] == 1);
+    double squares = 0.0;
+    for (const double t : {30.0, 31.0, 30.0, 30.0, 30.0, 33.0}) squares += (t - d.mean) * (t - d.mean);
+    DCHECK_NEAR(d.standardDeviation, std::sqrt(squares / 6.0), 1e-12);
+    const boxbox::SectorDistribution one = boxbox::sectorDistribution(analytics, 0, 1);
+    DCHECK(one.histogram.size() == 1U && one.histogram[0] == 6);
+    DCHECK_THROWS(boxbox::sectorDistribution(analytics, 3, 3), std::out_of_range);
+    DCHECK_THROWS(boxbox::sectorDistribution(analytics, 0, 0), std::invalid_argument);
+
+    // Comparison, car 1 against car 2.
+    const std::vector<boxbox::SectorComparisonRow> cmp = boxbox::compareSectors(analytics, 1, 2);
+    DCHECK(cmp.size() == 3U);
+    if (cmp.size() == 3U) {
+        DCHECK_NEAR(cmp[0].averageA, 10.0, 1e-12);
+        DCHECK_NEAR(cmp[0].averageB, 37.0 / 3.0, 1e-12);
+        DCHECK_NEAR(cmp[0].averageGap, 10.0 - 37.0 / 3.0, 1e-12);
+        DCHECK(cmp[0].averageGap < 0.0);                     // car 1 quicker in sector 1
+        DCHECK_NEAR(cmp[1].fastestB, 18.0, 1e-12);
+    }
+    DCHECK_THROWS(boxbox::compareSectors(analytics, 1, 9), std::out_of_range);
+
+    // Records the checks must refuse.
+    const auto rejects = [&](auto&& change) {
+        std::vector<LapRecord> bad = placed;
+        change(bad);
+        bool threw = false;
+        try {
+            const DriverAnalytics a({1, 2}, bad);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        return threw;
+    };
+    DCHECK(rejects([](std::vector<LapRecord>& r) { r[0].sectorTimes[1] = -1.0; r[0].lapTime -= 21.0; }));
+    DCHECK(rejects([](std::vector<LapRecord>& r) { r[0].sectorTimes[0] = std::nan(""); }));
+    DCHECK(rejects([](std::vector<LapRecord>& r) { r[0].lapTime += 5.0; }));          // parts no longer add up
+    DCHECK(rejects([](std::vector<LapRecord>& r) { r[2].sectorTimes.pop_back(); r[2].lapTime -= 30.0; }));
+    DCHECK(!rejects([](std::vector<LapRecord>&) {}));
+
+    // Records with no sector times: nothing available, nothing invented.
+    const DriverAnalytics plain({1}, {lapOf(1, 1, 90.0), lapOf(1, 2, 91.0)});
+    DCHECK(!boxbox::sectorSummaries(plain)[0].available);
+    DCHECK(boxbox::fieldBestSectors(plain).empty());
+    DCHECK_NEAR(boxbox::fieldBestCombinedLap(plain), 0.0, 0.0);
+    DCHECK_THROWS(boxbox::sectorDistribution(plain, 0, 2), std::invalid_argument);
+    DCHECK_THROWS(boxbox::compareSectors(plain, 1, 1), std::invalid_argument);
+}
+
+void testSectorAgainstBruteForce() {
+    beginSection("Sector analytics vs direct calculation, 60 seeded fields");
+
+    Lcg rng(6060ULL);
+    for (int trial = 0; trial < 60; ++trial) {
+        const int cars = rng.nextInt(1, 5);
+        const std::size_t sectors = static_cast<std::size_t>(rng.nextInt(1, 4));
+        std::vector<int> field;
+        std::vector<LapRecord> records;
+        std::vector<int> laps(static_cast<std::size_t>(cars), 0);
+        for (int c = 0; c < cars; ++c) field.push_back(10 + c);
+        const int total = rng.nextInt(0, 24);
+        for (int i = 0; i < total; ++i) {
+            const std::size_t c = rng.nextIndex(static_cast<std::size_t>(cars));
+            LapRecord r = lapOf(field[c], ++laps[c], 0.0);
+            r.position = 1;
+            for (std::size_t k = 0; k < sectors; ++k) {
+                // Coarse values on purpose, so exact ties happen.
+                r.sectorTimes.push_back(20.0 + static_cast<double>(rng.nextInt(0, 6)));
+            }
+            for (const double s : r.sectorTimes) r.lapTime += s;
+            records.push_back(r);
+        }
+        const DriverAnalytics analytics(field, records);
+        const std::vector<boxbox::DriverSectorSummary> sums = boxbox::sectorSummaries(analytics);
+        const std::vector<boxbox::FieldSectorBest> best = boxbox::fieldBestSectors(analytics);
+
+        // Direct passes.
+        for (std::size_t c = 0; c < field.size(); ++c) {
+            std::vector<double> fastest(sectors, 1.0e9);
+            std::vector<int> fastLap(sectors, 0);
+            std::vector<double> sum(sectors, 0.0);
+            int n = 0;
+            for (const LapRecord& r : records) {
+                if (r.driverNumber != field[c]) continue;
+                ++n;
+                for (std::size_t k = 0; k < sectors; ++k) {
+                    if (r.sectorTimes[k] < fastest[k]) {
+                        fastest[k] = r.sectorTimes[k];
+                        fastLap[k] = r.lap;
+                    }
+                    sum[k] += r.sectorTimes[k];
+                }
+            }
+            DCHECK(sums[c].available == (n > 0));
+            if (n == 0) continue;
+            double combined = 0.0;
+            for (std::size_t k = 0; k < sectors; ++k) {
+                DCHECK_NEAR(sums[c].fastest[k].time, fastest[k], 0.0);
+                DCHECK(sums[c].fastest[k].lap == fastLap[k]);
+                DCHECK_NEAR(sums[c].average[k], sum[k] / n, 1e-9);
+                combined += fastest[k];
+            }
+            DCHECK_NEAR(sums[c].bestCombinedLap, combined, 1e-9);
+        }
+
+        if (records.empty()) {
+            DCHECK(best.empty());
+            continue;
+        }
+        DCHECK(best.size() == sectors);
+        for (std::size_t k = 0; k < sectors; ++k) {
+            double lowest = 1.0e9;
+            for (const LapRecord& r : records) lowest = std::min(lowest, r.sectorTimes[k]);
+            DCHECK_NEAR(best[k].time, lowest, 0.0);
+            // The tie-break: among records at the best time, the earliest lap, then the lowest car.
+            int bestLap = 1 << 30;
+            int bestCar = 1 << 30;
+            for (const LapRecord& r : records) {
+                if (r.sectorTimes[k] == lowest &&
+                    (r.lap < bestLap || (r.lap == bestLap && r.driverNumber < bestCar))) {
+                    bestLap = r.lap;
+                    bestCar = r.driverNumber;
+                }
+            }
+            DCHECK(best[k].lap == bestLap && best[k].driverNumber == bestCar);
+
+            const boxbox::SectorDistribution d = boxbox::sectorDistribution(analytics, k, 4);
+            int inBins = 0;
+            for (const int count : d.histogram) inBins += count;
+            DCHECK(d.count == static_cast<int>(records.size()) && inBins == d.count);
+            DCHECK_NEAR(d.minimum, lowest, 0.0);
+            DCHECK(d.minimum <= d.mean + 1e-9 && d.mean <= d.maximum + 1e-9);
+            DCHECK(d.standardDeviation >= 0.0);
+        }
+    }
+}
+
 }  // namespace
 
 DriverTestTally runDriverAnalyticsTests() {
@@ -1357,6 +1674,10 @@ DriverTestTally runDriverAnalyticsTests() {
     testWindowsAgainstBruteForce();
     testRankDrivers();
     testDeterminism();
+    testMonotonicDequeLarge();
+    testModelledSplit();
+    testSectorArithmetic();
+    testSectorAgainstBruteForce();
 
     return g_tally;
 }

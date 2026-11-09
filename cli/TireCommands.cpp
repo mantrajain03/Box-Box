@@ -129,6 +129,10 @@ void printCliff(const DegradationProfile& p, std::ostream& out) {
     if (p.cliffActivationAge()) {
         out << "Cliff: from tire age " << *p.cliffActivationAge() << ", each lap of age adds "
             << p.cliffDegradationPerLap() << " s on top of normal wear\n";
+        if (p.cliffStepSeconds() && p.lapTimeChangeAfterCliff()) {
+            out << "Lap time jumps " << *p.cliffStepSeconds() << " s at that age, and the last legal lap is "
+                << *p.lapTimeChangeAfterCliff() << " s slower than the lap before the cliff\n";
+        }
     } else if (p.cliffLap() && !(p.cliffDegradationPerLap() > 0.0)) {
         out << "Cliff: configured after age " << *p.cliffLap()
             << ", but its rate is 0 s/lap, so it adds nothing\n";
@@ -145,14 +149,16 @@ void printProfile(const DegradationProfile& p, std::ostream& out) {
     out << "Maximum legal stint: " << p.maxStint() << " laps\n";
     printCliff(p, out);
     out << "\n";
-    out << "step = change from the previous lap; stint = total time of a stint\n"
-           "that ends on this lap, with no pit loss (PitStrategy::stintCost).\n\n";
+    out << "step = change from the previous lap; cumulative = seconds lost against a fresh\n"
+           "tire over the stint so far; stint = total time of a stint that ends on this\n"
+           "lap, with no pit loss (PitStrategy::stintCost).\n\n";
     out << std::setw(5) << "age" << std::setw(13) << "lap (s)" << std::setw(13) << "step (s)"
-        << std::setw(15) << "vs fresh (s)" << std::setw(17) << "stint (s)" << "\n";
+        << std::setw(15) << "vs fresh (s)" << std::setw(16) << "cumulative (s)" << std::setw(17)
+        << "stint (s)" << "\n";
     for (std::size_t a = 0; a < p.lapTime().size(); ++a) {
         out << std::setw(5) << a << std::setw(13) << p.lapTime()[a] << std::setw(13)
             << p.incrementalDegradation()[a] << std::setw(15) << p.degradationVsFresh()[a]
-            << std::setw(17) << p.stintCost()[a + 1U];
+            << std::setw(16) << p.cumulativeDegradation()[a] << std::setw(17) << p.stintCost()[a + 1U];
         if (p.cliffActivationAge() && static_cast<int>(a) == *p.cliffActivationAge()) {
             out << "   <- cliff";
         }
@@ -165,14 +171,19 @@ int runProfile(const std::vector<std::string>& args, const PitStrategy& strategy
     const ParsedOptions parsed = parseOptions(args);
     allowOnly(parsed, {"--compound"}, false);
 
+    // The compound is resolved before anything is printed, so a bad name leaves stdout empty.
+    const auto it = parsed.single.find("--compound");
+    std::size_t chosen = 0;
+    if (it != parsed.single.end()) {
+        chosen = findCompound(strategy, it->second);
+    }
+
     out << std::fixed << std::setprecision(3);
     out << "Tire degradation profile, track " << strategy.track().name() << " (base lap "
         << strategy.track().baseLapTime() << " s)\n\n";
 
-    const auto it = parsed.single.find("--compound");
     if (it != parsed.single.end()) {
-        printProfile(DegradationProfile::fromStrategy(strategy, findCompound(strategy, it->second)),
-                     out);
+        printProfile(DegradationProfile::fromStrategy(strategy, chosen), out);
         return kTiresOk;
     }
     const std::vector<DegradationProfile> profiles = buildProfiles(strategy);
@@ -254,16 +265,39 @@ int runThreshold(const std::vector<std::string>& args, const PitStrategy& strate
               false);
 
     const std::size_t c = findCompound(strategy, requireOpt(parsed, "--compound"));
+    const bool both = parsed.single.count("--max-degradation") != 0U &&
+                      parsed.single.count("--max-average") != 0U;
     const std::size_t modes = parsed.single.count("--max-degradation") +
                               parsed.single.count("--max-average") +
                               parsed.single.count("--slower-than");
-    if (modes != 1U) {
-        throw UsageError("give exactly one of --max-degradation, --max-average, --slower-than");
+    if (!(modes == 1U || (both && modes == 2U))) {
+        throw UsageError("give exactly one of --max-degradation, --max-average, --slower-than, "
+                         "or both --max-degradation and --max-average to list legal stint lengths");
     }
 
     const DegradationProfile profile = DegradationProfile::fromStrategy(strategy, c);
     const std::string& name = strategy.compounds()[c].name();
     out << std::fixed << std::setprecision(3);
+
+    if (both) {
+        const double maxAverage = parseSeconds(parsed.single.at("--max-average"), "--max-average");
+        const double maxDegradation =
+            parseSeconds(parsed.single.at("--max-degradation"), "--max-degradation");
+        const std::vector<int> legal = stintLengthsWithin(profile, maxAverage, maxDegradation);
+        out << name << ": stint lengths averaging at most " << maxAverage
+            << " s/lap whose last lap loses at most " << maxDegradation
+            << " s vs a fresh tire: ";
+        if (legal.empty()) {
+            out << "none\n";
+        } else {
+            for (std::size_t i = 0; i < legal.size(); ++i) {
+                out << (i > 0U ? ", " : "") << legal[i];
+            }
+            out << " laps (" << legal.size() << " of " << profile.maxStint() << " legal lengths)\n";
+        }
+        out << "method: linear scan over every legal stint length\n";
+        return kTiresOk;
+    }
 
     if (const auto it = parsed.single.find("--max-degradation"); it != parsed.single.end()) {
         const double limit = parseSeconds(it->second, "--max-degradation");
@@ -338,6 +372,8 @@ void printTiresHelp(std::ostream& out) {
            "      First tire age losing more than SECONDS vs a fresh tire.\n"
            "  threshold --compound NAME --max-average SECONDS\n"
            "      Longest stint whose average lap stays at or under SECONDS.\n"
+           "  threshold --compound NAME --max-degradation SECONDS --max-average SECONDS\n"
+           "      With both given: every stint length that meets both limits.\n"
            "  threshold --compound NAME --slower-than OTHER\n"
            "      First tire age where NAME becomes slower than OTHER.\n"
            "  help\n"

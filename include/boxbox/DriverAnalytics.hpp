@@ -27,9 +27,11 @@
 ///     differ in the last bits, so those alone are compared with
 ///     definitelyLess and kTimeEpsilon (see summarizeWindows)
 ///
-/// No sector analytics. The simulator records no per-car sector times (see
-/// LapRecord), and the plan (sec. 4.3E and 8.4) rules out presenting the
-/// track's configured sector times as a car's measured performance.
+/// Sector analytics are MODELLED, not measured. The simulator records no per-car
+/// sector times (see LapRecord); the sector times here are a deterministic split
+/// of each lap, and the plan (sec. 4.3E and 8.4) rules out presenting either
+/// them or the track's configured sector times as a car's measured performance.
+/// See the "Sector analytics" block near the end of this file.
 
 #include <cstddef>
 #include <limits>
@@ -40,6 +42,7 @@
 
 #include "boxbox/LapRecord.hpp"
 #include "boxbox/RaceSimulator.hpp"
+#include "boxbox/Track.hpp"
 
 namespace boxbox {
 
@@ -367,6 +370,93 @@ double rankValue(const DriverSummary& summary, RankMetric metric) noexcept;
 ///
 /// COST: O(D log D).
 std::vector<int> rankDrivers(const std::vector<DriverSummary>& summaries, RankMetric metric);
+
+// ---------------------------------------------------------------------------
+// Sector analytics (plan sec. 4.3E)
+//
+// MODELLED, NOT MEASURED. The simulator times whole laps only. Sector times
+// exist here because LapRecorder splits each lap in proportion to the track's
+// configured sector durations (modelledSectorTimes). They carry no information
+// beyond the lap time, so every statistic below is the lap statistic seen
+// through a fixed set of proportions. The functions work on any records that
+// carry sectorTimes, and say "no sector data" for records that carry none.
+// ---------------------------------------------------------------------------
+
+/// Split `lapTime` over the track's sectors in proportion to their configured
+/// base times; the last sector takes the remainder so the parts add back to
+/// `lapTime`. Empty when the track has no sectors or its base lap time is not
+/// positive. COST: O(sectors).
+std::vector<double> modelledSectorTimes(const Track& track, double lapTime);
+
+/// The fastest time in one sector and the lap it came on.
+struct SectorBest {
+    int lap = 0;        ///< 0 when no lap has been recorded
+    double time = 0.0;
+};
+
+/// One car's modelled sector statistics. `available` is false when its records
+/// carry no sector times.
+struct DriverSectorSummary {
+    int driverNumber = 0;
+    bool available = false;
+    std::vector<SectorBest> fastest;   ///< per sector; earliest lap on ties
+    std::vector<double> average;       ///< per sector
+    double bestCombinedLap = 0.0;      ///< sum of `fastest`: the car's "ideal" lap
+};
+
+/// Statistics of one sector's times over every lap of every car.
+struct SectorDistribution {
+    int count = 0;
+    double minimum = 0.0;
+    double maximum = 0.0;
+    double mean = 0.0;
+    double standardDeviation = 0.0;    ///< population (divides by count)
+    std::vector<int> histogram;        ///< equal-width bins from minimum to maximum
+};
+
+/// The fastest time in one sector over the whole field, and who set it.
+struct FieldSectorBest {
+    int driverNumber = 0;              ///< 0 when no lap has been recorded
+    int lap = 0;
+    double time = 0.0;
+};
+
+/// One sector of a two-car comparison.
+struct SectorComparisonRow {
+    std::size_t sector = 0;            ///< 0-based
+    double fastestA = 0.0;
+    double fastestB = 0.0;
+    double averageA = 0.0;
+    double averageB = 0.0;
+    double averageGap = 0.0;           ///< averageA - averageB; negative means A is quicker
+};
+
+/// Per-car modelled sector statistics, one per car in grid order. A car with no
+/// sector data is returned with available == false. COST: O(R * S) for R
+/// records and S sectors.
+std::vector<DriverSectorSummary> sectorSummaries(const DriverAnalytics& analytics);
+
+/// The best time in each sector over the whole field. Ties go to the earlier
+/// lap, then the lower car number (exact comparison). Empty when no record has
+/// sector times. COST: O(R * S).
+std::vector<FieldSectorBest> fieldBestSectors(const DriverAnalytics& analytics);
+
+/// The sum of fieldBestSectors: the lap the field could post if one car took
+/// the best of every sector. 0 when there is no sector data.
+double fieldBestCombinedLap(const DriverAnalytics& analytics);
+
+/// Distribution of one sector's times over every recorded lap, with a
+/// histogram of `bins` equal-width bins (a single bin when every time is the
+/// same). COST: O(R + bins).
+/// \throws std::out_of_range if `sector` is not a sector of the records;
+///         std::invalid_argument if bins < 1 or no record has sector times.
+SectorDistribution sectorDistribution(const DriverAnalytics& analytics, std::size_t sector,
+                                      int bins);
+
+/// Sector-by-sector comparison of two cars. COST: O(R * S).
+/// \throws std::out_of_range for a car outside the field;
+///         std::invalid_argument if either car has no sector data.
+std::vector<SectorComparisonRow> compareSectors(const DriverAnalytics& analytics, int carA, int carB);
 
 }  // namespace boxbox
 

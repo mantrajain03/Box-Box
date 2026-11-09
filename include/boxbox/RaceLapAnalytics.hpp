@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "boxbox/FenwickTree.hpp"
 #include "boxbox/RaceSimulator.hpp"
 #include "boxbox/SegmentTree.hpp"
 
@@ -93,13 +94,29 @@ public:
     explicit RaceLapRecorder(const RaceSimulator& simulator);
 
     /// Record each car that completed a lap since the last call, and the
-    /// running order now.
+    /// running order now. A call in which no car completed a lap records
+    /// nothing, so a repeated observe() is harmless.
     /// \throws std::invalid_argument if the field changed size, or a car
     ///         completed more than one lap since the last call (a missed
     ///         observe), or went backwards.
     void observe(const RaceSimulator& simulator);
 
     std::size_t carCount() const noexcept { return laps_.size(); }
+
+    /// Seconds the car at `driverIndex` lost to traffic (FR-9) over laps
+    /// firstLap .. lastLap, both included. Zero with overtaking off.
+    /// Backed by a FenwickTree of per-lap traffic losses: one point add per
+    /// car per lap when recorded, then O(log N) for any window. (Because laps
+    /// arrive in order, a running-total array would answer in O(1); the tree
+    /// is kept because it also supports adding to an EARLIER lap, which a
+    /// prefix array would need an O(N) rebuild for.)
+    /// \throws std::out_of_range for a bad index, or unless
+    ///         1 <= firstLap <= lastLap <= that car's recorded laps.
+    double trafficLoss(std::size_t driverIndex, int firstLap, int lastLap) const;
+
+    /// The same, summed over every car. O(D log N).
+    /// \throws std::out_of_range unless 1 <= firstLap <= lastLap <= lapsObserved().
+    double fieldTrafficLoss(int firstLap, int lastLap) const;
 
     /// Laps of the car at `driverIndex` (index into RaceSimulator::drivers()).
     /// \throws std::out_of_range for a bad index.
@@ -118,6 +135,8 @@ public:
 
 private:
     std::vector<LapTimeIndex> laps_;
+    std::vector<FenwickTree> traffic_;      ///< per car: traffic seconds lost on each lap
+    std::vector<double> trafficSoFar_;      ///< per car: Driver::trafficLoss() at the last record
     std::vector<std::vector<int>> orders_;  ///< orders_[k]: after lap k
 };
 

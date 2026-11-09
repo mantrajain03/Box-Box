@@ -47,7 +47,13 @@ class MonotonicDeque {
 public:
     enum class Kind { Minimum, Maximum };
 
-    /// \throws std::invalid_argument if window is 0.
+    /// Largest window accepted. The ring is allocated up front at the window's
+    /// size, so an absurd window is rejected here instead of failing inside
+    /// the allocator. A caller that only needs min(window, stream length)
+    /// slots, as trailingWindows does, should cap the window itself.
+    static constexpr std::size_t kMaxWindow = std::size_t{1} << 26;
+
+    /// \throws std::invalid_argument if window is 0 or above kMaxWindow.
     MonotonicDeque(std::size_t window, Kind kind);
 
     /// Append the next value of the stream. Its stream index is the value of

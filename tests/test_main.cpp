@@ -31,6 +31,11 @@
 #include "boxbox/Track.hpp"
 
 #include "DriverAnalyticsTests.hpp"
+#include "CliTests.hpp"
+#include "EdgeTests.hpp"
+#include "EventTests.hpp"
+#include "ExportTests.hpp"
+#include "StrategyTests.hpp"
 #include "TireModuleTests.hpp"
 
 namespace {
@@ -950,6 +955,104 @@ void testLeaderboard() {
     }
 }
 
+void testLeaderboardLargeAndInterleaved() {
+    beginSection("Leaderboard: single entry, large fields, and interleaved push / pop");
+
+    using boxbox::Leaderboard;
+    using boxbox::LeaderboardEntry;
+
+    // A single entry.
+    {
+        LeaderboardEntry only;
+        only.driverNumber = 7;
+        only.lapsCompleted = 3;
+        only.cumulativeTime = 271.5;
+        Leaderboard board(std::vector<LeaderboardEntry>{only});
+        CHECK(board.size() == 1U);
+        CHECK(board.peek().driverNumber == 7);
+        CHECK(board.takeTop(5).size() == 1U);       // k above the size gives what exists
+        CHECK(board.empty());
+        board.push(only);
+        CHECK(board.pop().driverNumber == 7);
+        CHECK(board.empty());
+        CHECK_THROWS(board.pop());
+        CHECK_THROWS(board.peek());
+    }
+
+    Lcg random(2468ULL);
+    const auto entry = [&](std::size_t index) {
+        LeaderboardEntry e;
+        e.driverIndex = index;
+        e.driverNumber = random.nextInt(1, 100000);     // distinct enough; ties broken by number
+        e.lapsCompleted = random.nextInt(0, 3);
+        e.cumulativeTime = static_cast<double>(random.nextInt(0, 400));   // many equal times
+        return e;
+    };
+
+    // Large: 50,000 entries drained into a full order must equal a full sort.
+    {
+        std::vector<LeaderboardEntry> field;
+        for (std::size_t i = 0; i < 50000U; ++i) field.push_back(entry(i));
+        std::vector<LeaderboardEntry> expected = field;
+        std::sort(expected.begin(), expected.end(), Leaderboard::isAhead);
+        Leaderboard heapified(field);
+        Leaderboard pushed;
+        for (const LeaderboardEntry& e : field) pushed.push(e);
+        const std::vector<LeaderboardEntry> a = heapified.drainOrdered();
+        const std::vector<LeaderboardEntry> b = pushed.drainOrdered();
+        bool sameA = a.size() == expected.size();
+        bool sameB = b.size() == expected.size();
+        for (std::size_t i = 0; sameA && sameB && i < expected.size(); ++i) {
+            // Entries tie only on (laps, time, number); equal keys are interchangeable.
+            sameA = !Leaderboard::isAhead(a[i], expected[i]) && !Leaderboard::isAhead(expected[i], a[i]);
+            sameB = !Leaderboard::isAhead(b[i], expected[i]) && !Leaderboard::isAhead(expected[i], b[i]);
+        }
+        CHECK(sameA);
+        CHECK(sameB);
+        CHECK(heapified.empty() && pushed.empty());
+    }
+
+    // Interleaved: 20,000 mixed operations against a plain vector scanned for the best entry.
+    {
+        Leaderboard board;
+        std::vector<LeaderboardEntry> reference;
+        bool agree = true;
+        for (int step = 0; step < 20000; ++step) {
+            const int action = random.nextInt(0, 9);
+            if (action < 6 || reference.empty()) {                 // push (60%)
+                const LeaderboardEntry e = entry(static_cast<std::size_t>(step));
+                board.push(e);
+                reference.push_back(e);
+            } else if (action < 9) {                               // pop (30%)
+                std::size_t best = 0;
+                for (std::size_t i = 1; i < reference.size(); ++i) {
+                    if (Leaderboard::isAhead(reference[i], reference[best])) best = i;
+                }
+                const LeaderboardEntry popped = board.pop();
+                agree = agree && !Leaderboard::isAhead(popped, reference[best]) &&
+                        !Leaderboard::isAhead(reference[best], popped);
+                // Remove the reference entry that matches what the heap returned.
+                for (std::size_t i = 0; i < reference.size(); ++i) {
+                    if (reference[i].driverIndex == popped.driverIndex) {
+                        reference.erase(reference.begin() + static_cast<std::ptrdiff_t>(i));
+                        break;
+                    }
+                }
+            } else {                                               // peek (10%)
+                std::size_t best = 0;
+                for (std::size_t i = 1; i < reference.size(); ++i) {
+                    if (Leaderboard::isAhead(reference[i], reference[best])) best = i;
+                }
+                const LeaderboardEntry& top = board.peek();
+                agree = agree && !Leaderboard::isAhead(top, reference[best]) &&
+                        !Leaderboard::isAhead(reference[best], top);
+            }
+            agree = agree && board.size() == reference.size();
+        }
+        CHECK(agree);
+    }
+}
+
 void testStandings() {
     beginSection("Standings through the leaderboard");
 
@@ -1425,6 +1528,7 @@ int main() {
     testSimulatorEdgeCases();
     testEvaluatePlan();
     testLeaderboard();
+    testLeaderboardLargeAndInterleaved();
     testStandings();
     testDeterminism();
     testStopsOutsideTheRace();
@@ -1439,6 +1543,26 @@ int main() {
     const DriverTestTally drivers = runDriverAnalyticsTests();
     g_checks += drivers.checks;
     g_failures += drivers.failures;
+
+    const EventTestTally events = runEventEngineTests();
+    g_checks += events.checks;
+    g_failures += events.failures;
+
+    const StrategyTestTally strategyLab = runStrategyAnalysisTests();
+    g_checks += strategyLab.checks;
+    g_failures += strategyLab.failures;
+
+    const CliTestTally cli = runCliTests();
+    g_checks += cli.checks;
+    g_failures += cli.failures;
+
+    const EdgeTestTally edges = runEdgeTests();
+    g_checks += edges.checks;
+    g_failures += edges.failures;
+
+    const ExportTestTally exportBundle = runExportTests();
+    g_checks += exportBundle.checks;
+    g_failures += exportBundle.failures;
 
     std::cout << "\n---------------------\n";
     std::cout << g_checks << " checks, " << g_failures << " failed\n";

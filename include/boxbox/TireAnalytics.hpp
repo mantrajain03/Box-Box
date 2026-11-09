@@ -107,6 +107,21 @@ public:
     /// lapTime[a] - lapTime[0]. maxStint() entries.
     const std::vector<double>& degradationVsFresh() const noexcept { return vsFresh_; }
 
+    /// cumulativeDegradation()[a]: seconds lost against a fresh tire over the
+    /// first a + 1 laps of a stint, i.e. the sum of degradationVsFresh over
+    /// ages 0..a. maxStint() entries.
+    const std::vector<double>& cumulativeDegradation() const noexcept { return cumulative_; }
+
+    /// The jump in lap time at the age the cliff first bites: lapTime[age] -
+    /// lapTime[age - 1], which is normal wear plus one lap of cliff rate.
+    /// Empty when cliffActivationAge() is.
+    std::optional<double> cliffStepSeconds() const noexcept;
+
+    /// Lap-time change from the last lap before the cliff to the last legal
+    /// lap of the stint: lapTime.back() - lapTime[activation - 1]. Empty when
+    /// cliffActivationAge() is.
+    std::optional<double> lapTimeChangeAfterCliff() const noexcept;
+
     /// stintCost()[k]: green-flag seconds of a k-lap stint, excluding pit
     /// loss. maxStint() + 1 entries; [0] is 0.0.
     const std::vector<double>& stintCost() const noexcept { return stintCost_; }
@@ -141,6 +156,7 @@ private:
     std::vector<double> lapTime_;
     std::vector<double> incremental_;
     std::vector<double> vsFresh_;
+    std::vector<double> cumulative_;
     std::vector<double> stintCost_;
     std::vector<double> average_;
     bool nonDecreasing_ = false;

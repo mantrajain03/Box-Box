@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "boxbox/Common.hpp"
+#include "boxbox/LapTime.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 
@@ -60,8 +61,8 @@ DegradationProfile DegradationProfile::fromStrategy(const PitStrategy& strategy,
     p.lapTime_.resize(m);
     p.stintCost_.assign(m + 1U, 0.0);
     for (int age = 0; age < maxStint; ++age) {
-        // The canonical lap: the same sum RaceSimulator::lapTimeFor uses.
-        const double lap = track.baseLapTime() + compound.lapDelta(age);
+        // The canonical lap: the very function RaceSimulator::lapTimeFor calls.
+        const double lap = canonicalLapTime(track, compound, age);
         requireFinite(lap, "DegradationProfile: lap time");
         p.lapTime_[static_cast<std::size_t>(age)] = lap;
 
@@ -100,9 +101,11 @@ void DegradationProfile::deriveFromLapsAndCosts() {
 
     incremental_.assign(m, 0.0);
     vsFresh_.assign(m, 0.0);
+    cumulative_.assign(m, 0.0);
     nonDecreasing_ = true;
     for (std::size_t a = 0; a < m; ++a) {
         vsFresh_[a] = lapTime_[a] - lapTime_[0];
+        cumulative_[a] = (a > 0U ? cumulative_[a - 1U] : 0.0) + vsFresh_[a];
         if (a > 0U) {
             incremental_[a] = lapTime_[a] - lapTime_[a - 1U];
             if (lapTime_[a] < lapTime_[a - 1U]) {
@@ -118,6 +121,24 @@ void DegradationProfile::deriveFromLapsAndCosts() {
         const double raw = stintCost_[k] / static_cast<double>(k);
         average_[k] = (nonDecreasing_ && k > 1U && raw < average_[k - 1U]) ? average_[k - 1U] : raw;
     }
+}
+
+// O(1). The activation age is at least 1: a cliff after age -1 would be no cliff.
+std::optional<double> DegradationProfile::cliffStepSeconds() const noexcept {
+    if (!cliffActivationAge_ || *cliffActivationAge_ < 1 ||
+        static_cast<std::size_t>(*cliffActivationAge_) >= incremental_.size()) {
+        return std::nullopt;
+    }
+    return incremental_[static_cast<std::size_t>(*cliffActivationAge_)];
+}
+
+// O(1).
+std::optional<double> DegradationProfile::lapTimeChangeAfterCliff() const noexcept {
+    if (!cliffActivationAge_ || *cliffActivationAge_ < 1 ||
+        static_cast<std::size_t>(*cliffActivationAge_) >= lapTime_.size()) {
+        return std::nullopt;
+    }
+    return lapTime_.back() - lapTime_[static_cast<std::size_t>(*cliffActivationAge_) - 1U];
 }
 
 // O(C*M).

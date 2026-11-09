@@ -23,6 +23,9 @@ namespace boxbox {
 /// total. A SegmentTree could do the same in the same bound; the Fenwick tree
 /// is shorter and needs no minimum, which this job never asks for.
 ///
+/// Second use: RaceLapRecorder keeps each car's per-lap traffic loss in one,
+/// so the loss over any window of laps is a range sum in O(log N).
+///
 /// The operations are the ones the plan (sec. 4.2C) lists: point update,
 /// prefix sum, range sum, and a build. Nothing else is offered, so the tree
 /// stores only its n + 1 nodes and no copy of the values.

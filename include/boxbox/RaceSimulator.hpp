@@ -96,7 +96,11 @@ public:
     ///
     /// COST: O(D) per call for D drivers with overtaking off. With FR-9 on it
     /// is O(D log D): the start-of-lap running order is drained from a
-    /// Leaderboard heap, then walked once.
+    /// Leaderboard heap, then walked once. With an event sink set (see
+    /// setEventSink) each car also pushes a handful of events (at most 7: lap,
+    /// attempt, pass or hold, finish or the three pit events, and a position
+    /// change), O(log E) apiece for E queued events, plus one standings() call
+    /// per lap, so a lap then costs O(D log E + D log D) more.
     bool advanceLap();
 
     /// Advance until every car has finished. O(N*D) for an N-lap race, or
@@ -111,7 +115,13 @@ public:
 
     bool finished() const noexcept;
 
-    void setEventSink(EventPriorityQueue* sink) noexcept { eventSink_ = sink; }
+    /// Set (or, with nullptr, clear) the optional event sink. Changing it
+    /// forgets the position baseline, so the next PositionChange is measured
+    /// from the standings at the next lap rather than from a stale round.
+    void setEventSink(EventPriorityQueue* sink) noexcept {
+        eventSink_ = sink;
+        positionsSeeded_ = false;
+    }
 
     /// FR-5. The time the next lap will take for `driver`, computed from THAT
     /// driver's own compound and its own tire age - never a flat track lap
@@ -156,8 +166,16 @@ private:
 
     /// One lap under the FR-9 rule. O(D log D).
     void advanceLapWithTraffic();
+    /// How the FR-9 rule treated a car on the lap just completed.
+    enum class TrafficOutcome { Clear, Passed, Held };
+
+    /// Emit this lap's events to the sink, if one is set. `other` is the car
+    /// directly ahead and `holdSeconds` the time lost; both are only
+    /// meaningful for Passed / Held.
     void emitLapEvents(const Driver& driver, std::size_t stintIndexBefore,
-                        std::size_t compoundIndexBefore);
+                        std::size_t compoundIndexBefore,
+                        TrafficOutcome outcome = TrafficOutcome::Clear,
+                        int other = -1, double holdSeconds = 0.0);
 
     /// Turn an already-ordered entry list into positions and gaps. O(D).
     std::vector<Standing> toStandings(const std::vector<LeaderboardEntry>& ordered) const;
@@ -168,6 +186,16 @@ private:
     OvertakeRule overtakeRule_;
     int lapsRun_ = 0;
     EventPriorityQueue* eventSink_ = nullptr;
+
+    /// Running positions at the end of the previous lap round, by driver
+    /// index; only kept while an event sink is set. See emitPositionChanges.
+    std::vector<int> lastPositions_;
+    bool positionsSeeded_ = false;
+
+    /// After a full lap round, emit a PositionChange for every car whose place
+    /// differs from the previous round. Read-only (standings() is const).
+    /// O(D log D) per lap, and only when a sink is set.
+    void emitPositionChanges();
 };
 
 }  // namespace boxbox

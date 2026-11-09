@@ -77,8 +77,11 @@ RaceLapRecorder::RaceLapRecorder(const RaceSimulator& simulator) {
         }
     }
     laps_.reserve(simulator.drivers().size());
+    traffic_.reserve(simulator.drivers().size());
+    trafficSoFar_.assign(simulator.drivers().size(), 0.0);
     for (std::size_t i = 0; i < simulator.drivers().size(); ++i) {
         laps_.emplace_back(simulator.track().totalLaps());
+        traffic_.emplace_back(static_cast<std::size_t>(simulator.track().totalLaps()));
     }
     orders_.push_back(boxbox::runningOrder(simulator));  // the grid
 }
@@ -99,12 +102,25 @@ void RaceLapRecorder::observe(const RaceSimulator& simulator) {
                                         " were recorded; call observe() after every lap");
         }
     }
+    bool anyLap = false;
     for (std::size_t i = 0; i < drivers.size(); ++i) {
         if (drivers[i].lapsCompleted() == laps_[i].recordedLaps() + 1) {
             laps_[i].recordLap(drivers[i].lapsCompleted(), drivers[i].lastLapTime());
+            // Traffic lost on THIS lap: the growth of the car's running total.
+            const double total = drivers[i].trafficLoss();
+            traffic_[i].add(static_cast<std::size_t>(drivers[i].lapsCompleted() - 1),
+                            total - trafficSoFar_[i]);
+            trafficSoFar_[i] = total;
+            anyLap = true;
         }
     }
-    orders_.push_back(boxbox::runningOrder(simulator));
+    // A call in which no car completed a lap (observe() twice with no
+    // advanceLap() between) records nothing. Pushing another running order
+    // would put orders_ out of step with the lap numbers: lapsObserved() would
+    // run ahead of every car's recorded laps.
+    if (anyLap) {
+        orders_.push_back(boxbox::runningOrder(simulator));
+    }
 }
 
 const LapTimeIndex& RaceLapRecorder::carLaps(std::size_t driverIndex) const {
@@ -112,6 +128,32 @@ const LapTimeIndex& RaceLapRecorder::carLaps(std::size_t driverIndex) const {
         throw std::out_of_range("RaceLapRecorder: no car at index " + std::to_string(driverIndex));
     }
     return laps_[driverIndex];
+}
+
+// O(log N). Inclusive laps become the tree's half-open [first-1, last).
+double RaceLapRecorder::trafficLoss(std::size_t driverIndex, int firstLap, int lastLap) const {
+    const LapTimeIndex& laps = carLaps(driverIndex);  // checks the index
+    if (firstLap < 1 || firstLap > lastLap || lastLap > laps.recordedLaps()) {
+        throw std::out_of_range("RaceLapRecorder: laps " + std::to_string(firstLap) + " to " +
+                                std::to_string(lastLap) + " are not a window of the " +
+                                std::to_string(laps.recordedLaps()) + " recorded laps");
+    }
+    return traffic_[driverIndex].rangeSum(static_cast<std::size_t>(firstLap - 1),
+                                          static_cast<std::size_t>(lastLap));
+}
+
+// O(D log N).
+double RaceLapRecorder::fieldTrafficLoss(int firstLap, int lastLap) const {
+    if (firstLap < 1 || firstLap > lastLap || lastLap > lapsObserved()) {
+        throw std::out_of_range("RaceLapRecorder: laps " + std::to_string(firstLap) + " to " +
+                                std::to_string(lastLap) + " are not a window of the " +
+                                std::to_string(lapsObserved()) + " observed laps");
+    }
+    double total = 0.0;
+    for (std::size_t i = 0; i < traffic_.size(); ++i) {
+        total += trafficLoss(i, firstLap, lastLap);
+    }
+    return total;
 }
 
 const std::vector<int>& RaceLapRecorder::runningOrder(int lap) const {

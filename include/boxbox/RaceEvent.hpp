@@ -25,11 +25,17 @@ namespace boxbox {
 ///
 /// Rationale for CompoundChange before PitExit: a compound change models
 /// tyre fitting, which happens before the car leaves the pit lane.
+///
+/// PositionChange sorts after LapCompleted so a car's lap is logged before the
+/// change of place that lap produced; OvertakeAttempt sorts before the Overtake
+/// or TrafficHold that resolves it.
 enum class RaceEventType {
     PitEntry,
     CompoundChange,
     PitExit,
     LapCompleted,
+    PositionChange,
+    OvertakeAttempt,
     Overtake,
     TrafficHold,
     RaceFinish
@@ -41,9 +47,10 @@ enum class RaceEventType {
 /// states which event type(s) populate it. Fields left at their default are
 /// unused for that event's type, not missing data.
 struct RaceEvent {
-    RaceEventType type;
+    RaceEventType type = RaceEventType::LapCompleted;
 
-    /// Seconds, same clock as Driver::cumulativeTime.
+    /// Seconds, same clock as Driver::cumulativeTime. Must be finite and not
+    /// negative: EventPriorityQueue::push rejects anything else.
     double timestamp = 0.0;
 
     /// Matches LeaderboardEntry::driverNumber, not a driver array index.
@@ -56,22 +63,29 @@ struct RaceEvent {
     /// never meaningful on its own.
     std::uint64_t sequenceId = 0;
 
-    // --- CompoundChange payload ---
-    /// Compound index before the stop. CompoundChange only.
+    // --- CompoundChange / LapCompleted payload ---
+    /// CompoundChange: compound index before the stop.
+    /// LapCompleted: compound index the lap just completed was run on, which
+    /// lets a log alone say which compound every stint started on.
     int oldCompoundIndex = -1;
     /// Compound index after the stop. CompoundChange only.
     int newCompoundIndex = -1;
 
     // --- CompoundChange / PitExit payload ---
-    /// Tire age at the moment of this event. Always 0 for CompoundChange
-    /// (a fresh set is fitted), meaningful as "age of the set just removed"
-    /// is NOT tracked here deliberately - the simulator's Driver already
-    /// owns that. PitExit: age of the newly fitted tire, i.e. 0.
+    /// Age of the tire fitted by the stop, which is always 0 (a fresh set).
+    /// The age of the set that was removed is not recorded here; it is the
+    /// preceding LapCompleted's stint length and the Driver already owns it.
     int tireAgeAtEvent = 0;
 
-    // --- Overtake / TrafficHold payload ---
-    /// The car this event happened relative to (the car passed, or the car
-    /// that caused the hold). -1 when not applicable.
+    // --- PositionChange payload ---
+    /// Running positions (1 = leader) before and after the lap round that
+    /// produced this event. PositionChange only; 0 otherwise.
+    int oldPosition = 0;
+    int newPosition = 0;
+
+    // --- OvertakeAttempt / Overtake / TrafficHold payload ---
+    /// The car this event happened relative to (the car it caught, passed, or
+    /// was held by). -1 when not applicable.
     int otherDriverNumber = -1;
 
     // --- TrafficHold payload ---
@@ -81,20 +95,21 @@ struct RaceEvent {
 
 /// Strict weak order for the event queue (NFR-5).
 ///
-/// Four levels, each firing only when every level above is a true tie.
-/// Deliberately NOT a single epsilon-based `<` on timestamp alone: that
-/// would leave near-equal timestamps in an ambiguous zone that breaks
-/// strict weak ordering once combined with the other keys. Falling through
-/// to the next level only on a genuine tie (neither definitelyLess(a,b) nor
-/// definitelyLess(b,a)) keeps the overall relation strict and transitive,
-/// which is required for correct heap behaviour.
+/// Four levels, each firing only when every level above is an exact tie.
+/// The timestamp level compares exactly, with no tolerance. A tolerance
+/// comparison ("equal within 1e-9") is not transitive - a ~ b and b ~ c does
+/// not imply a ~ c - so using it as the first key of a lexicographic order
+/// would break strict weak ordering and let a heap misorder near-equal
+/// chains. Exact comparison is a genuine total preorder, and it is still
+/// deterministic because identical inputs produce bit-identical timestamps.
+/// push() guarantees timestamps are finite, so NaN cannot reach this.
 ///
 /// Exposed as a free function, matching Leaderboard::isAhead's pattern, so
 /// a test can check the heap against a brute-force sort using exactly this
 /// comparison.
 inline bool eventComesBefore(const RaceEvent& a, const RaceEvent& b) noexcept {
-    if (definitelyLess(a.timestamp, b.timestamp)) return true;
-    if (definitelyLess(b.timestamp, a.timestamp)) return false;
+    if (a.timestamp < b.timestamp) return true;
+    if (b.timestamp < a.timestamp) return false;
 
     if (a.type != b.type) {
         return static_cast<int>(a.type) < static_cast<int>(b.type);

@@ -15,6 +15,7 @@ flat `boxbox` namespace, like the rest of the core.
 | `include/boxbox/FenwickTree.hpp`, `src/FenwickTree.cpp` | Prefix and range sums with point updates, O(N) build |
 | `include/boxbox/TireAnalytics.hpp`, `src/TireAnalytics.cpp` | Degradation profiles, tire-age range analyzer, threshold and crossover queries |
 | `include/boxbox/RaceLapAnalytics.hpp`, `src/RaceLapAnalytics.cpp` | Lap-time index over simulated laps, race recorder, position-swap count |
+| `include/boxbox/LapTime.hpp` | `canonicalLapTime`, the single lap-time sum shared with `RaceSimulator` |
 | `cli/TireCommands.hpp`, `cli/TireCommands.cpp` | `boxbox tires ...`: parsing and printing only |
 | `cli/RaceLapReport.hpp`, `cli/RaceLapReport.cpp` | The `--race-laps` report: printing only |
 | `tests/test_tire_module.cpp`, `tests/TireModuleTests.hpp` | Checks, run by `make test` |
@@ -24,7 +25,7 @@ The sources sit directly in `src/` and the headers in `include/boxbox/`, so
 the Makefile's existing `src/*.cpp`, `cli/*.cpp` and `tests/*.cpp` wildcards
 build them unchanged.
 
-Edits to shared files, all additive (see `shared-file-edits.diff`):
+Edits to shared files, all additive:
 
 * `Makefile`: a separate `bench` target only. NFR-6 makes the Makefile the one
   way to build anything, so the benchmark needs its own target; `make` and
@@ -38,13 +39,28 @@ Edits to shared files, all additive (see `shared-file-edits.diff`):
   byte for byte apart from the help text, and with `--race-laps` the only
   difference is the added report.
 
+## Added 2026-11-10 (plan sec. 4.2A and 4.2D)
+
+* `DegradationProfile::cumulativeDegradation()`: seconds lost against a fresh tire over the
+  first a + 1 laps of a stint (the running sum of `degradationVsFresh`; checked against
+  `stintCost[a + 1] - (a + 1) × fresh lap`, an independent route to the same number).
+* `cliffStepSeconds()`: the jump in lap time at the age the cliff first bites (normal wear plus
+  one lap of cliff rate). `lapTimeChangeAfterCliff()`: the change from the last lap before the
+  cliff to the last legal lap. Both are empty exactly when `cliffActivationAge()` is.
+* `tires profile` prints the cumulative column and both cliff figures.
+* `tires threshold --compound NAME --max-degradation S --max-average S` (both given) lists every
+  legal stint length that meets both limits, by scanning all lengths: `stintLengthsWithin` now
+  has a CLI.
+* The Fenwick tree is also tested at scale (60,000 slots, 30,000 interleaved updates and range
+  queries against a plain array, plus the linear build against 60,000 separate adds).
+
 ## Sources of truth
 
 Nothing in this module re-implements the race model.
 
 | Value | Where it comes from |
 |---|---|
-| Lap time at a tire age | `Track::baseLapTime() + TireCompound::lapDelta(age)`, the same sum `RaceSimulator::lapTimeFor` uses |
+| Lap time at a tire age | `canonicalLapTime` in `include/boxbox/LapTime.hpp` (`Track::baseLapTime() + TireCompound::lapDelta(age)`), the one function both `RaceSimulator::lapTimeFor` and `DegradationProfile` call |
 | Stint cost | `PitStrategy::stintCost`, read from the optimizer's prefix table |
 | Cliff rate | `TireCompound::cliffDegradationPerLap()`, read directly |
 | Simulated lap time | `Driver::lastLapTime()`, read from outside `RaceSimulator` |
@@ -240,10 +256,18 @@ of it: one prefix sum and one point update per car. Start positions are found
 by binary search in a list sorted by car number, not a hash map, so the
 O(D log D) bound holds in every case (a hash map is O(1) only on average, and
 the plan asks for that worst case to be stated). That is against O(D²)
-for checking every pair. The earlier `LapStatAccumulator` (running totals by
-lap) was dropped. Neither the event engine nor driver analytics needs it,
-because lap data is only ever appended, and running totals already give any
-range sum in O(1).
+for checking every pair.
+
+The earlier `LapStatAccumulator` (running totals by lap) was dropped in
+agreement with Mantra, because lap data is only ever appended and running
+totals already give any range sum in O(1). The plan (sec. 8.1, item 8) still
+asks for cumulative lap-time or traffic-loss statistics on a Fenwick tree, so
+`RaceLapRecorder::trafficLoss` and `fieldTrafficLoss` (added 2026-11-10) keep
+each car's per-lap traffic loss in a `FenwickTree` and answer any lap window
+in O(log N). On append-only data a prefix array would answer in O(1); the
+tree is kept to satisfy the plan and because it also takes a correction to an
+earlier lap without an O(N) rebuild. This reverses part of the 2026-11-06
+agreement with Mantra and is listed under "Open questions".
 
 **One tree per tire profile, not two.** A degradation value is that lap's
 time minus the original fresh lap, so a range's total degradation is
@@ -274,7 +298,10 @@ so would reporting only the first crossover: `compareCompounds` gives
 
 ## Tests
 
-`make test` runs 195,639 checks for this module alongside the existing 3,311:
+`make test` runs this module's checks as part of the single total the harness
+prints (262,435 checks across all modules on 2026-11-10; the harness does not
+print a per-module split, so earlier per-module figures are not repeated).
+They cover:
 
 * empty, single-element, boundary and invalid inputs, ties, values that are
   not finite, rejected calls leaving the structure unchanged, repeated
@@ -315,7 +342,11 @@ so would reporting only the first crossover: `compareCompounds` gives
     `kClosureTolerance`
   * without traffic, every lap equals the model worked out from the plan
   * swap counts match brute force, and cars really do swap places
-* misuse: a recorder created after the start, a missed `observe()`, bad indices
+  * Fenwick-backed traffic loss over random lap windows matches each lap's
+    recorded time minus the model lap, per car and for the whole field, and is
+    exactly zero with overtaking off
+* misuse: a recorder created after the start, a missed `observe()`, bad
+  indices, and a repeated `observe()` with no lap run (a no-op)
 * agreed with Mantra: with no override, `TireRangeAnalyzer` range sums equal
   differences of `PitStrategy::stintCost`, and the minimum of any age range is
   its first age, equal to `lapDelta` there (300 seeded compounds)
@@ -326,7 +357,10 @@ so would reporting only the first crossover: `compareCompounds` gives
 
 Inputs come from the same seeded LCG as `test_main.cpp`.
 
-Fault injection, each mutant built clean in a throwaway copy:
+Fault injection, each mutant built clean in a throwaway copy. These results
+were recorded by the module's author; nothing in the repository reproduces
+them, and they were not re-run in the 2026-11-10 review, so treat the counts
+as the author's report rather than a repeatable check:
 
 | Mutant | Failures |
 |---|---|
@@ -363,8 +397,13 @@ only the test that reads the message.
 
 ## Benchmarks
 
-`make bench` on Linux, g++ 13, -O2. Each time is the median of 5 runs, and
-correctness is checked before any timing. Numbers vary by machine.
+`make bench`, -O2 (the optimizer, event queue, top-K and deque benchmarks live in
+`benchmarks/bench_strategy.cpp`; see `docs/STRATEGY_MODULE.md`). Each time is the
+median of 5 runs, and correctness is checked before any timing. Numbers vary by machine. The table below was
+measured on Linux with g++ 13; run `make bench` for figures on your own
+machine, including the 1,000 and 10,000 sizes the table omits and the later
+cases (Fenwick linear build against n adds, segment tree update + minimum
+against a plain array, and threshold binary search against a scan).
 
 | Operation | Size | Queries | Tree | Brute force |
 |---|---|---|---|---|
@@ -379,7 +418,9 @@ correctness is checked before any timing. Numbers vary by machine.
 | Position swaps (Fenwick) | 20,000 cars | 1 | 1.4 ms | 96 ms |
 
 At real sizes (a 45-age tire profile, a 20-car field) a plain scan is as fast
-or faster. The structures win from about 1,000 values up.
+or faster. The structures pull ahead at large sizes (the 100,000-value rows
+above); where exactly the crossover falls is for `make bench` to show on the
+machine in hand, since the table has no 1,000 or 10,000 row.
 
 ## Exception to NFR-5
 
@@ -396,19 +437,22 @@ the benchmark exception to NFR-5 himself.
 
 ## Status
 
-* **Windows/MSYS2 UCRT64: not validated yet.** Mantra will run
-  `mingw32-make clean test`, plain `mingw32-make` and `mingw32-make bench`
-  once the branch is pushed (`clean test` alone does not build `main.cpp` or
-  the benchmarks), and send the full output. Until those pass, this module is
-  validated on Linux only (GCC 13 and Clang 18).
+* **Windows: validated 2026-11-10** with `mingw32-make` and g++ 15.2.0
+  (MinGW-W64 x86_64-ucrt-posix-seh, target `x86_64-w64-mingw32`): a clean
+  `mingw32-make` with zero warnings, `mingw32-make test` (262,435 checks, 0
+  failed) and `mingw32-make bench` (all correctness checks passed). This is a
+  Windows MinGW-W64 toolchain, not an MSYS2 UCRT64 shell; nobody has run it
+  under MSYS2 itself.
 * **Tire-profile and comparison interface: agreed with Sarthak** on
   2026-11-06, and implemented as agreed.
-* **Shared-file edits: agreed in principle by Mantra; to be pushed** to the
-  branch on GitHub so he reviews exactly what he would commit.
+* **Shared-file edits** are merged on `main`.
 
 ## Open questions
 
-None. Every question to Pratyaksh, Sarthak and Mantra has been answered.
+* Whether `RaceLapRecorder::trafficLoss` / `fieldTrafficLoss` (Fenwick-backed,
+  added 2026-11-10 to meet plan sec. 8.1 item 8) should stay, given that
+  Mantra's 2026-11-06 reply preferred no Fenwick tree for lap totals. They are
+  additive and nothing else depends on them.
 
 ## Answered
 

@@ -24,6 +24,7 @@
 #include "boxbox/EventPriorityQueue.hpp"
 #include "boxbox/PitAnalytics.hpp"
 #include "boxbox/RaceEvent.hpp"
+#include "boxbox/RaceState.hpp"
 #include "boxbox/Driver.hpp"
 #include "boxbox/DriverAnalytics.hpp"
 #include "boxbox/PitStrategy.hpp"
@@ -32,7 +33,10 @@
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 #include "DriverReport.hpp"
+#include "ExportCommand.hpp"
 #include "RaceLapReport.hpp"
+#include "PitReport.hpp"
+#include "StrategyCommands.hpp"
 #include "TireCommands.hpp"
 
 namespace {
@@ -80,6 +84,9 @@ double parseDouble(const std::string& text, const std::string& what) {
     }
     if (!ok) {
         throw std::invalid_argument(what + ": expected a number, got \"" + text + "\"");
+    }
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument(what + ": expected a finite number, got \"" + text + "\"");
     }
     return value;
 }
@@ -199,6 +206,8 @@ const char* eventTypeName(RaceEventType type) noexcept {
         case RaceEventType::CompoundChange: return "CompoundChange";
         case RaceEventType::PitExit: return "PitExit";
         case RaceEventType::LapCompleted: return "LapCompleted";
+        case RaceEventType::PositionChange: return "PositionChange";
+        case RaceEventType::OvertakeAttempt: return "OvertakeAttempt";
         case RaceEventType::Overtake: return "Overtake";
         case RaceEventType::TrafficHold: return "TrafficHold";
         case RaceEventType::RaceFinish: return "RaceFinish";
@@ -235,6 +244,10 @@ void printEventLog(const EventLog& eventLog,
             } else {
                 std::cout << "index " << newIndex;
             }
+        } else if (event.type == RaceEventType::PositionChange) {
+            std::cout << "  P" << event.oldPosition << " -> P" << event.newPosition;
+        } else if (event.type == RaceEventType::OvertakeAttempt) {
+            std::cout << "  caught driver " << event.otherDriverNumber;
         } else if (event.type == RaceEventType::Overtake) {
             std::cout << "  passed driver " << event.otherDriverNumber;
         } else if (event.type == RaceEventType::TrafficHold) {
@@ -242,59 +255,6 @@ void printEventLog(const EventLog& eventLog,
                       << "  loss " << formatSeconds(event.holdLossSeconds) << " s";
         }
         std::cout << '\n';
-    }
-    std::cout << '\n';
-}
-
-void printPitReport(const EventLog& eventLog, double pitLoss,
-                    const std::vector<TireCompound>& compounds) {
-    std::cout << "\n=== Pit Report ===\n";
-    PitAnalytics analytics(eventLog);
-    const std::vector<boxbox::DriverPitSummary> summaries = analytics.allSummaries();
-
-    if (summaries.empty()) {
-        std::cout << "  No driver pit data recorded.\n\n";
-    } else {
-        for (const boxbox::DriverPitSummary& summary : summaries) {
-            std::cout << "  Driver " << summary.driverNumber
-                      << "  stops: " << summary.stopCount
-                      << "  pit loss: "
-                      << formatSeconds(analytics.totalPitLoss(summary.driverNumber, pitLoss))
-                      << " s\n";
-
-            for (std::size_t i = 0; i < summary.stintLengthsLaps.size(); ++i) {
-                std::cout << "    Stint " << (i + 1U) << ": ";
-                if (i < summary.compoundIndicesUsed.size()) {
-                    const int compoundIndex = summary.compoundIndicesUsed[i];
-                    if (compoundIndex >= 0 &&
-                        static_cast<std::size_t>(compoundIndex) < compounds.size()) {
-                        std::cout << compounds[static_cast<std::size_t>(compoundIndex)].name();
-                    } else {
-                        std::cout << "compound index " << compoundIndex;
-                    }
-                } else {
-                    std::cout << "unknown compound";
-                }
-                std::cout << ", " << summary.stintLengthsLaps[i] << " laps\n";
-            }
-
-            if (!summary.stopLaps.empty()) {
-                std::cout << "    Stop at end of lap(s): ";
-                for (std::size_t i = 0; i < summary.stopLaps.size(); ++i) {
-                    if (i > 0U) std::cout << ", ";
-                    std::cout << summary.stopLaps[i];
-                }
-                std::cout << '\n';
-            }
-        }
-    }
-
-    const PitAnalytics::PitWindow window = analytics.pitWindow();
-    if (window.hasStops) {
-        std::cout << "  Overall pit window: laps " << window.earliestStopLap
-                  << " - " << window.latestStopLap << '\n';
-    } else {
-        std::cout << "  Overall pit window: no pit stops recorded\n";
     }
     std::cout << '\n';
 }
@@ -352,8 +312,15 @@ void printUsage(std::ostream& out) {
         "                          rankings.\n"
         "  --top-laps K            The K fastest and K slowest laps of the race,\n"
         "                          and the fastest lap on each compound.\n"
+        "  --top-laps-car N        With --top-laps: only car number N's laps.\n"
+        "  --top-laps-range F:T    With --top-laps: only laps F to T (inclusive).\n"
         "  --lap-window W          Each car's quickest and slowest run of W laps,\n"
         "                          and its widest lap-time spread within W laps.\n"
+        "  --sector-stats          Each car's fastest and average sector, best\n"
+        "                          combined lap, and the field's best sectors. Sector\n"
+        "                          times are a MODELLED split of each lap in\n"
+        "                          proportion to the track's sectors, not measured.\n"
+        "  --sector-compare A:B    Sector-by-sector comparison of cars A and B.\n"
         "\n"
         "Tire analytics:\n"
         "  tires COMMAND ...       Degradation profiles, range queries and\n"
@@ -361,12 +328,28 @@ void printUsage(std::ostream& out) {
         "                          Must come after the race options. See\n"
         "                          `boxbox tires help`.\n"
         "\n"
+        "Strategy lab:\n"
+        "  strategy COMMAND ...    Evaluate your own plan, compare strategies, list the\n"
+        "                          K cheapest plans, sweep pit loss or a compound\n"
+        "                          parameter, best plan per stop count, clean air vs\n"
+        "                          traffic. Must come after the race options. See\n"
+        "                          `boxbox strategy help`.\n"
+        "\n"
+        "Web frontend:\n"
+        "  export [OPTIONS]        Write the data bundle the web frontend renders to\n"
+        "                          frontend/data. Must come after the race options. See\n"
+        "                          `boxbox export help`.\n"
+        "\n"
         "Output:\n"
         "  --show-table            Print the per-compound stint-cost table.\n"
         "  --events                Print the chronological race event log. Implies\n"
         "                          --simulate.\n"
-        "  --pit-report            Print per-driver pit-stop and stint analytics.\n"
-        "                          Implies --simulate.\n"
+        "  --pit-report            Print per-driver pit-stop and stint analytics:\n"
+        "                          stint statistics and distribution, stops in order,\n"
+        "                          stint coverage, traffic after each stop. Implies\n"
+        "                          --simulate.\n"
+        "  --pit-window FROM:TO    With the pit report: stops, cars and pit loss in laps\n"
+        "                          FROM to TO. Implies --pit-report.\n"
         "  -h, --help              This message.\n"
         "\n"
         "Exit status:\n"
@@ -376,11 +359,8 @@ void printUsage(std::ostream& out) {
         "  boxbox --laps 50 --pit-loss 22.0\n"
         "  boxbox --laps 50 --rivals --lap-log 10\n"
         "  boxbox --laps 50 --rivals --overtake --lap-log 10\n"
-<<<<<<< HEAD
         "  boxbox --laps 50 --rivals --overtake --driver-stats --top-laps 5\n"
-=======
         "  boxbox --laps 50 --events --pit-report\n"
->>>>>>> 71e2442d21b2b31a816b361faa026d822b209f48
         "  boxbox --laps 4 --pit-loss 5 --sector 10 \\\n"
         "           --compound A:0:1:3 --compound B:2:0:4 --show-table\n";
 }
@@ -604,10 +584,22 @@ struct Options {
     bool driverStats = false;  // --driver-stats
     int topLaps = 0;           // --top-laps K; 0 means not requested
     int lapWindow = 0;         // --lap-window W; 0 means not requested
+    int pitWindowFrom = 0;     // --pit-window FROM:TO; 0 means none
+    int pitWindowTo = 0;
+    bool sectorStats = false;  // --sector-stats
+    int sectorCompareA = 0;    // --sector-compare A:B; 0 means none
+    int sectorCompareB = 0;
+    int topLapsCar = 0;        // --top-laps-car N; 0 means every car
+    int topLapsFrom = 0;       // --top-laps-range FROM:TO; 0 means every lap
+    int topLapsTo = 0;
     OvertakeRule overtake;  // validated by the core, in RaceSimulator::setOvertakeRule
     bool showHelp = false;
     bool tires = false;                  // `tires` subcommand given
     std::vector<std::string> tiresArgs;  // everything after the word `tires`
+    bool strategyLab = false;                  // `strategy` subcommand given
+    std::vector<std::string> strategyArgs;     // everything after the word `strategy`
+    bool exportBundle = false;                 // `export` subcommand given
+    std::vector<std::string> exportArgs;       // everything after the word `export`
 };
 
 /// Returns the value that follows `--flag`, or throws if it is missing.
@@ -702,6 +694,50 @@ Options parseArguments(int argc, char** argv) {
                 throw std::invalid_argument("--top-laps: must be at least 1");
             }
             options.simulate = true;
+        } else if (arg == "--pit-window") {
+            const std::string spec = requireValue(argc, argv, i, arg);
+            const std::vector<std::string> parts = split(spec, ':');
+            if (parts.size() != 2U) {
+                throw std::invalid_argument("--pit-window \"" + spec + "\": expected FROM:TO");
+            }
+            options.pitWindowFrom = parseInt(parts[0], "--pit-window FROM");
+            options.pitWindowTo = parseInt(parts[1], "--pit-window TO");
+            if (options.pitWindowFrom < 1 || options.pitWindowFrom > options.pitWindowTo) {
+                throw std::invalid_argument("--pit-window: need 1 <= FROM <= TO");
+            }
+            options.showPitReport = true;
+            options.simulate = true;
+        } else if (arg == "--sector-stats") {
+            options.sectorStats = true;
+            options.simulate = true;
+        } else if (arg == "--sector-compare") {
+            const std::string spec = requireValue(argc, argv, i, arg);
+            const std::vector<std::string> parts = split(spec, ':');
+            if (parts.size() != 2U) {
+                throw std::invalid_argument("--sector-compare \"" + spec + "\": expected CAR:CAR");
+            }
+            options.sectorCompareA = parseInt(parts[0], "--sector-compare first car");
+            options.sectorCompareB = parseInt(parts[1], "--sector-compare second car");
+            if (options.sectorCompareA < 1 || options.sectorCompareB < 1) {
+                throw std::invalid_argument("--sector-compare: car numbers start at 1");
+            }
+            options.simulate = true;
+        } else if (arg == "--top-laps-car") {
+            options.topLapsCar = parseInt(requireValue(argc, argv, i, arg), "--top-laps-car");
+            if (options.topLapsCar < 1) {
+                throw std::invalid_argument("--top-laps-car: car numbers start at 1");
+            }
+        } else if (arg == "--top-laps-range") {
+            const std::string spec = requireValue(argc, argv, i, arg);
+            const std::vector<std::string> parts = split(spec, ':');
+            if (parts.size() != 2U) {
+                throw std::invalid_argument("--top-laps-range \"" + spec + "\": expected FROM:TO");
+            }
+            options.topLapsFrom = parseInt(parts[0], "--top-laps-range FROM");
+            options.topLapsTo = parseInt(parts[1], "--top-laps-range TO");
+            if (options.topLapsFrom < 1 || options.topLapsFrom > options.topLapsTo) {
+                throw std::invalid_argument("--top-laps-range: need 1 <= FROM <= TO");
+            }
         } else if (arg == "--lap-window") {
             options.lapWindow = parseInt(requireValue(argc, argv, i, arg), "--lap-window");
             if (options.lapWindow < 1) {
@@ -728,10 +764,28 @@ Options parseArguments(int argc, char** argv) {
                 options.tiresArgs.emplace_back(argv[j]);
             }
             break;
+        } else if (arg == "strategy") {
+            // Likewise: --plan, --compound and friends mean something else here.
+            options.strategyLab = true;
+            for (int j = i + 1; j < argc; ++j) {
+                options.strategyArgs.emplace_back(argv[j]);
+            }
+            break;
+        } else if (arg == "export") {
+            // Likewise: --out and friends belong to the export handler.
+            options.exportBundle = true;
+            for (int j = i + 1; j < argc; ++j) {
+                options.exportArgs.emplace_back(argv[j]);
+            }
+            break;
         } else {
             throw std::invalid_argument("unrecognised option \"" + arg +
                                         "\"; try --help");
         }
+    }
+
+    if (options.topLaps == 0 && (options.topLapsCar > 0 || options.topLapsFrom > 0)) {
+        throw std::invalid_argument("--top-laps-car and --top-laps-range need --top-laps K");
     }
 
     return options;
@@ -770,13 +824,44 @@ int main(int argc, char** argv) {
         std::vector<TireCompound> compounds =
             options.compoundsOverridden ? options.compounds : boxbox::defaultCompounds();
 
+        // A lap that takes zero or negative time is not a race. lapDelta never falls below
+        // basePace, so the fresh-tire lap is the quickest a compound can run.
+        for (const TireCompound& compound : compounds) {
+            const double freshLap = track.baseLapTime() + compound.lapDelta(0);
+            if (!(freshLap > 0.0)) {
+                throw std::invalid_argument(
+                    "compound " + compound.name() + ": a fresh-tire lap would take " +
+                    formatSeconds(freshLap) +
+                    " s; the track's base lap time plus the compound's base pace must be positive");
+            }
+        }
+
         const PitStrategy strategy(track, compounds);
 
         if (options.tires) {
             return boxbox::runTiresCommand(options.tiresArgs, strategy, std::cout, std::cerr);
         }
+        if (options.strategyLab) {
+            return boxbox::runStrategyCommand(options.strategyArgs, strategy, std::cout, std::cerr);
+        }
+        if (options.exportBundle) {
+            return boxbox::runExportCommand(options.exportArgs, strategy, std::cout, std::cerr);
+        }
 
+        // Cars are numbered 1..N: the optimal car, then one rival per compound.
         // Checked before anything is printed, like the FR-9 settings below.
+        const int carCount =
+            1 + (options.rivals ? static_cast<int>(strategy.compounds().size()) : 0);
+        if (options.sectorCompareA > carCount || options.sectorCompareB > carCount ||
+            options.topLapsCar > carCount) {
+            throw std::invalid_argument("a car number is outside this race, which has cars 1 to " +
+                                        std::to_string(carCount));
+        }
+        if (options.pitWindowTo > track.totalLaps()) {
+            throw std::invalid_argument("--pit-window: lap " + std::to_string(options.pitWindowTo) +
+                                        " is past the race distance of " +
+                                        std::to_string(track.totalLaps()) + " laps");
+        }
         if (options.raceLapsTo > track.totalLaps()) {
             throw std::invalid_argument("--race-laps: lap " + std::to_string(options.raceLapsTo) +
                                         " is past the race distance of " +
@@ -846,7 +931,8 @@ int main(int argc, char** argv) {
             // Driver analytics: another outside observer, recording every
             // car's laps. Without one of its flags it does not exist either.
             std::optional<boxbox::LapRecorder> lapRecorder;
-            if (options.driverStats || options.topLaps > 0 || options.lapWindow > 0) {
+            if (options.driverStats || options.topLaps > 0 || options.lapWindow > 0 ||
+                options.sectorStats || options.sectorCompareA > 0 || options.showPitReport) {
                 lapRecorder.emplace(simulator);
             }
             const auto observeLap = [&]() {
@@ -877,9 +963,24 @@ int main(int argc, char** argv) {
                 printStandings(simulator, "Final classification");
             }
 
+            if (recorder) {
+                boxbox::printRaceLapReport(std::cout, simulator, *recorder, options.raceLapsFrom,
+                                           options.raceLapsTo);
+            }
+
             if (options.showEvents || options.showPitReport) {
                 while (!eventQueue.empty()) {
                     eventLog.record(eventQueue.pop());
+                }
+
+                // Replay the log through the per-driver state machines. The
+                // simulator only ever emits legal sequences, so a failure here
+                // is a real bug and is reported as a failed check.
+                const boxbox::EventLogValidation check = boxbox::validateEventLog(eventLog);
+                if (!check.valid) {
+                    std::cerr << "boxbox: event log failed state-machine validation at entry "
+                              << check.badIndex << ": " << check.message << '\n';
+                    return kExitClosureFailed;
                 }
             }
 
@@ -887,17 +988,42 @@ int main(int argc, char** argv) {
                 printEventLog(eventLog, strategy.compounds());
             }
             if (options.showPitReport) {
-                printPitReport(eventLog, strategy.track().pitLoss(), strategy.compounds());
+                boxbox::PitReportInput input;
+                input.log = &eventLog;
+                input.compounds = &strategy.compounds();
+                input.pitLoss = strategy.track().pitLoss();
+                input.raceLaps = strategy.track().totalLaps();
+                input.windowFrom = options.pitWindowFrom;
+                input.windowTo = options.pitWindowTo;
+                if (lapRecorder) {
+                    input.records = &lapRecorder->records();
+                }
+                boxbox::printPitReport(std::cout, input);
             }
 
             if (lapRecorder) {
                 const boxbox::DriverAnalytics analytics(*lapRecorder);
+                if (options.sectorStats) {
+                    boxbox::printSectorStats(std::cout, simulator, analytics);
+                }
+                if (options.sectorCompareA > 0) {
+                    boxbox::printSectorComparison(std::cout, simulator, analytics,
+                                                  options.sectorCompareA, options.sectorCompareB);
+                }
                 if (options.driverStats) {
                     boxbox::printDriverStats(std::cout, simulator, analytics);
                 }
                 if (options.topLaps > 0) {
+                    boxbox::LapFilter filter;
+                    if (options.topLapsCar > 0) {
+                        filter.driverNumber = options.topLapsCar;
+                    }
+                    if (options.topLapsFrom > 0) {
+                        filter.firstLap = options.topLapsFrom;
+                        filter.lastLap = options.topLapsTo;
+                    }
                     boxbox::printTopLaps(std::cout, simulator, analytics,
-                                         static_cast<std::size_t>(options.topLaps));
+                                         static_cast<std::size_t>(options.topLaps), filter);
                 }
                 if (options.lapWindow > 0) {
                     boxbox::printLapWindows(std::cout, analytics,

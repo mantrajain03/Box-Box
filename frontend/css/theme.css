@@ -1,0 +1,50 @@
+/* Box Box design tokens. Dark only; every colour has one meaning (see FRONTEND.md sec. 2). */
+:root {
+  --bg: #0b0b10;
+  --panel: #12121a;
+  --panel-2: #181824;
+  --border: #23232f;
+  --text: #e8e8ee;
+  --muted: #8a8a9a;
+
+  --red: #ff2d3d;     /* primary accent, SOFT */
+  --blue: #3b82f6;    /* info, pit entries */
+  --purple: #a855f7;  /* algorithms, optimum */
+  --green: #22c55e;   /* gains, optimal, pass */
+  --yellow: #facc15;  /* MEDIUM, warnings */
+  --pink: #ec4899;    /* overtakes, events */
+
+  --radius: 8px;
+  --gap: 16px;
+  --font-ui: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, p { margin: 0; }
+button { font: inherit; color: inherit; }
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* Nothing animates on its own, but hover and bar transitions should still stand down on request. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }

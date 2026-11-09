@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "boxbox/Common.hpp"
+#include "boxbox/LapTime.hpp"
 
 namespace boxbox {
 
@@ -47,6 +48,7 @@ void RaceSimulator::validatePlan(const std::vector<Stint>& plan) const {
 void RaceSimulator::addDriver(int number, std::string name, std::vector<Stint> plan) {
     validatePlan(plan);
     drivers_.emplace_back(number, std::move(name), std::move(plan));
+    positionsSeeded_ = false;   // the field changed size: reseed the position baseline
 }
 
 // FR-7. The stop laps come from the optimizer's own backtracked plan; nothing
@@ -88,7 +90,7 @@ double RaceSimulator::lapTimeFor(const Driver& driver) const {
         return 0.0;
     }
     const TireCompound& compound = compounds_[driver.currentCompoundIndex()];
-    return track_.baseLapTime() + compound.lapDelta(driver.tireAge());
+    return canonicalLapTime(track_, compound, driver.tireAge());
 }
 
 // O(D) per lap with overtaking off; O(D log D) with it on.
@@ -97,7 +99,16 @@ bool RaceSimulator::advanceLap() {
         return false;
     }
 
-        if (overtakeRule_.enabled) {
+    // The grid order is the baseline the first PositionChange is measured from.
+    if (eventSink_ != nullptr && !positionsSeeded_) {
+        lastPositions_.assign(drivers_.size(), 0);
+        for (const Standing& row : standings()) {
+            lastPositions_[row.driverIndex] = row.position;
+        }
+        positionsSeeded_ = true;
+    }
+
+    if (overtakeRule_.enabled) {
         advanceLapWithTraffic();
     } else {
         for (Driver& driver : drivers_) {
@@ -112,7 +123,32 @@ bool RaceSimulator::advanceLap() {
     }
 
     ++lapsRun_;
+    emitPositionChanges();
     return true;
+}
+
+// Positions are those of RaceSimulator::standings() once every car has
+// completed the lap round, the same definition LapRecord::position uses.
+void RaceSimulator::emitPositionChanges() {
+    if (eventSink_ == nullptr || !positionsSeeded_) {
+        return;
+    }
+    for (const Standing& row : standings()) {
+        const int before = lastPositions_[row.driverIndex];
+        if (row.position == before) {
+            continue;
+        }
+        const Driver& driver = drivers_[row.driverIndex];
+        RaceEvent change;
+        change.type = RaceEventType::PositionChange;
+        change.timestamp = driver.cumulativeTime();
+        change.driverNumber = driver.number();
+        change.lap = driver.lapsCompleted();
+        change.oldPosition = before;
+        change.newPosition = row.position;
+        eventSink_->push(change);
+        lastPositions_[row.driverIndex] = row.position;
+    }
 }
 
 // FR-9, the "pass or hold" rule documented on OvertakeRule.
@@ -133,6 +169,7 @@ void RaceSimulator::advanceLapWithTraffic() {
     int aheadLaps = 0;
     double aheadCrossing = 0.0;  // when it crossed the line, before any pit loss
     double aheadPace = 0.0;      // its own lap time from sec. 3.2
+    int aheadNumber = -1;        // its car number, for event payloads
 
     for (const LeaderboardEntry& entry : order) {
         Driver& driver = drivers_[entry.driverIndex];
@@ -162,12 +199,18 @@ void RaceSimulator::advanceLapWithTraffic() {
         const std::size_t stintBefore = driver.stintIndex();
         const std::size_t compoundBefore = driver.currentCompoundIndex();
         driver.completeLap(pace, track_.pitLoss(), delay);
-        emitLapEvents(driver, stintBefore, compoundBefore);
+
+        TrafficOutcome outcome = TrafficOutcome::Clear;
+        if (caught) {
+            outcome = canPass ? TrafficOutcome::Passed : TrafficOutcome::Held;
+        }
+        emitLapEvents(driver, stintBefore, compoundBefore, outcome, aheadNumber, delay);
 
         haveAhead = true;
         aheadLaps = entry.lapsCompleted;
         aheadCrossing = crossing;
         aheadPace = pace;
+        aheadNumber = driver.number();
     }
 }
 
@@ -186,10 +229,17 @@ void RaceSimulator::reset() {
         driver.reset();
     }
     lapsRun_ = 0;
+    positionsSeeded_ = false;
+    lastPositions_.clear();
 }
+
+// Event emission is a read-only side channel: nothing here touches a Driver,
+// so logging cannot change race times (plan 4.4C).
 void RaceSimulator::emitLapEvents(const Driver& driver,
                                    std::size_t stintIndexBefore,
-                                   std::size_t compoundIndexBefore) {
+                                   std::size_t compoundIndexBefore,
+                                   TrafficOutcome outcome, int other,
+                                   double holdSeconds) {
     if (eventSink_ == nullptr) {
         return;
     }
@@ -199,7 +249,38 @@ void RaceSimulator::emitLapEvents(const Driver& driver,
     lapEvent.timestamp = driver.cumulativeTime();
     lapEvent.driverNumber = driver.number();
     lapEvent.lap = driver.lapsCompleted();
+    lapEvent.oldCompoundIndex = static_cast<int>(compoundIndexBefore);
     eventSink_->push(lapEvent);
+
+    if (outcome != TrafficOutcome::Clear) {
+        // The car caught the one ahead: an attempt, resolved by a pass or a hold.
+        RaceEvent attempt;
+        attempt.type = RaceEventType::OvertakeAttempt;
+        attempt.timestamp = driver.cumulativeTime();
+        attempt.driverNumber = driver.number();
+        attempt.lap = driver.lapsCompleted();
+        attempt.otherDriverNumber = other;
+        eventSink_->push(attempt);
+
+        RaceEvent traffic;
+        traffic.type = outcome == TrafficOutcome::Passed ? RaceEventType::Overtake
+                                                         : RaceEventType::TrafficHold;
+        traffic.timestamp = driver.cumulativeTime();
+        traffic.driverNumber = driver.number();
+        traffic.lap = driver.lapsCompleted();
+        traffic.otherDriverNumber = other;
+        traffic.holdLossSeconds = outcome == TrafficOutcome::Held ? holdSeconds : 0.0;
+        eventSink_->push(traffic);
+    }
+
+    if (driver.finished()) {
+        RaceEvent finish;
+        finish.type = RaceEventType::RaceFinish;
+        finish.timestamp = driver.cumulativeTime();
+        finish.driverNumber = driver.number();
+        finish.lap = driver.lapsCompleted();
+        eventSink_->push(finish);
+    }
 
     const bool stopped = driver.stintIndex() != stintIndexBefore;
     if (stopped) {

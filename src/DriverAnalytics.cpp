@@ -33,6 +33,11 @@ void checkRecord(const LapRecord& r, const LapRecord* previous, std::size_t fiel
     if (!std::isfinite(r.trafficTime) || r.trafficTime < 0.0) {
         throw std::invalid_argument(where + "traffic time must be finite and not negative");
     }
+    // The lap time includes traffic (LapRecord.hpp), so traffic cannot exceed
+    // it. The tolerance absorbs the rounding of a difference of running totals.
+    if (r.trafficTime > r.lapTime + kTimeEpsilon) {
+        throw std::invalid_argument(where + "traffic time exceeds the lap time that includes it");
+    }
     if (!std::isfinite(r.pitTime) || r.pitTime < 0.0) {
         throw std::invalid_argument(where + "pit time must be finite and not negative");
     }
@@ -56,6 +61,27 @@ void checkRecord(const LapRecord& r, const LapRecord* previous, std::size_t fiel
     if (r.position < 1 || static_cast<std::size_t>(r.position) > fieldSize) {
         throw std::invalid_argument(where + "position " + std::to_string(r.position) +
                                     " is outside 1 .. " + std::to_string(fieldSize));
+    }
+
+    // Modelled sector split: same count for every lap of a car, finite, not
+    // negative, and adding back to the lap time.
+    if (previous != nullptr && previous->sectorTimes.size() != r.sectorTimes.size()) {
+        throw std::invalid_argument(where + "the number of sector times changed from " +
+                                    std::to_string(previous->sectorTimes.size()) + " to " +
+                                    std::to_string(r.sectorTimes.size()));
+    }
+    if (!r.sectorTimes.empty()) {
+        double sum = 0.0;
+        for (const double t : r.sectorTimes) {
+            if (!std::isfinite(t) || t < 0.0) {
+                throw std::invalid_argument(where + "a sector time is negative or not finite");
+            }
+            sum += t;
+        }
+        // The split adds back to the lap up to rounding; allow a relative 1e-9.
+        if (std::fabs(sum - r.lapTime) > 1.0e-9 * std::max(1.0, std::fabs(r.lapTime))) {
+            throw std::invalid_argument(where + "the sector times do not add up to the lap time");
+        }
     }
 }
 
@@ -325,6 +351,7 @@ void LapRecorder::observe(const RaceSimulator& simulator) {
             r.tireAge = was.tireAge;
             r.stint = was.stint;
             r.position = position[i];
+            r.sectorTimes = modelledSectorTimes(simulator.track(), r.lapTime);
             records_.push_back(r);
         }
         before_[i] = stateOf(driver);
@@ -353,6 +380,7 @@ DriverAnalytics::DriverAnalytics(const std::vector<int>& field, std::vector<LapR
     // One pass: find the car's slot, check the record against that car's
     // previous one, then fold it in.
     std::vector<const LapRecord*> previous(cars, nullptr);
+    std::size_t fieldSectors = 0;   // sector count shared by every record that has sectors
     for (const LapRecord& r : records_) {
         const auto found = slot_.find(r.driverNumber);
         if (found == slot_.end()) {
@@ -361,6 +389,18 @@ DriverAnalytics::DriverAnalytics(const std::vector<int>& field, std::vector<LapR
         }
         const std::size_t s = found->second;
         checkRecord(r, previous[s], cars);
+        // Every car races the same track, so records that carry sector times must carry the
+        // same number of them; the field-wide sector queries rely on it.
+        if (!r.sectorTimes.empty()) {
+            if (fieldSectors == 0U) {
+                fieldSectors = r.sectorTimes.size();
+            } else if (r.sectorTimes.size() != fieldSectors) {
+                throw std::invalid_argument("DriverAnalytics: " + carAndLap(r) + " has " +
+                                            std::to_string(r.sectorTimes.size()) +
+                                            " sector times but other cars have " +
+                                            std::to_string(fieldSectors));
+            }
+        }
         addLap(summaries_[s], r);
         lapTimes_[s].push_back(r.lapTime);
         previous[s] = &r;
@@ -576,6 +616,203 @@ std::vector<int> rankDrivers(const std::vector<DriverSummary>& summaries, RankMe
         numbers.push_back(s->driverNumber);
     }
     return numbers;
+}
+
+// ---------------------------------------------------------------------------
+// Sector analytics: a MODELLED split of each lap, see the header.
+// ---------------------------------------------------------------------------
+
+// O(sectors).
+std::vector<double> modelledSectorTimes(const Track& track, double lapTime) {
+    std::vector<double> parts;
+    const double base = track.baseLapTime();
+    if (track.sectorCount() == 0U || !(base > 0.0)) {
+        return parts;
+    }
+    parts.reserve(track.sectorCount());
+    double assigned = 0.0;
+    for (std::size_t i = 0; i + 1U < track.sectorCount(); ++i) {
+        const double part = lapTime * track.sectors()[i].baseTime / base;
+        parts.push_back(part);
+        assigned += part;
+    }
+    // The remainder: the parts add back to the lap. Clamped at 0 because a last sector of base
+    // time 0 can leave a remainder a few 1e-15 below zero from rounding.
+    parts.push_back(std::max(0.0, lapTime - assigned));
+    return parts;
+}
+
+namespace {
+
+/// Index of each car's summary, for grouping records by car. Never iterated.
+std::unordered_map<int, std::size_t> slotsOf(const DriverAnalytics& analytics) {
+    std::unordered_map<int, std::size_t> slots;
+    for (std::size_t i = 0; i < analytics.summaries().size(); ++i) {
+        slots.emplace(analytics.summaries()[i].driverNumber, i);
+    }
+    return slots;
+}
+
+std::size_t sectorCountOf(const DriverAnalytics& analytics) {
+    for (const LapRecord& r : analytics.records()) {
+        if (!r.sectorTimes.empty()) {
+            return r.sectorTimes.size();
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
+// O(R * S): one pass over the records.
+std::vector<DriverSectorSummary> sectorSummaries(const DriverAnalytics& analytics) {
+    const auto slots = slotsOf(analytics);
+    const std::size_t cars = analytics.summaries().size();
+    std::vector<DriverSectorSummary> out(cars);
+    std::vector<std::vector<double>> sums(cars);
+    std::vector<int> laps(cars, 0);
+    for (std::size_t i = 0; i < cars; ++i) {
+        out[i].driverNumber = analytics.summaries()[i].driverNumber;
+    }
+    for (const LapRecord& r : analytics.records()) {
+        if (r.sectorTimes.empty()) {
+            continue;
+        }
+        const std::size_t c = slots.at(r.driverNumber);
+        DriverSectorSummary& s = out[c];
+        if (!s.available) {
+            s.available = true;
+            s.fastest.assign(r.sectorTimes.size(), SectorBest{});
+            sums[c].assign(r.sectorTimes.size(), 0.0);
+        }
+        for (std::size_t k = 0; k < r.sectorTimes.size(); ++k) {
+            // Exact <, so a tie keeps the earlier lap.
+            if (laps[c] == 0 || r.sectorTimes[k] < s.fastest[k].time) {
+                s.fastest[k] = SectorBest{r.lap, r.sectorTimes[k]};
+            }
+            sums[c][k] += r.sectorTimes[k];
+        }
+        ++laps[c];
+    }
+    for (std::size_t c = 0; c < cars; ++c) {
+        if (!out[c].available) {
+            continue;
+        }
+        out[c].average.resize(sums[c].size());
+        for (std::size_t k = 0; k < sums[c].size(); ++k) {
+            out[c].average[k] = sums[c][k] / static_cast<double>(laps[c]);
+            out[c].bestCombinedLap += out[c].fastest[k].time;
+        }
+    }
+    return out;
+}
+
+// O(R * S).
+std::vector<FieldSectorBest> fieldBestSectors(const DriverAnalytics& analytics) {
+    // DriverAnalytics refuses records with different sector counts, so every record that has
+    // sector times has exactly this many.
+    std::vector<FieldSectorBest> best(sectorCountOf(analytics));
+    std::vector<bool> seen(best.size(), false);
+    for (const LapRecord& r : analytics.records()) {
+        for (std::size_t k = 0; k < r.sectorTimes.size(); ++k) {
+            const double t = r.sectorTimes[k];
+            FieldSectorBest& b = best[k];
+            bool better = !seen[k] || t < b.time;
+            if (!better && !(b.time < t)) {  // an exact tie: earlier lap, then lower car number
+                better = r.lap < b.lap || (r.lap == b.lap && r.driverNumber < b.driverNumber);
+            }
+            if (better) {
+                seen[k] = true;
+                b = FieldSectorBest{r.driverNumber, r.lap, t};
+            }
+        }
+    }
+    return best;
+}
+
+double fieldBestCombinedLap(const DriverAnalytics& analytics) {
+    double total = 0.0;
+    for (const FieldSectorBest& b : fieldBestSectors(analytics)) {
+        total += b.time;
+    }
+    return total;
+}
+
+// O(R + bins).
+SectorDistribution sectorDistribution(const DriverAnalytics& analytics, std::size_t sector,
+                                      int bins) {
+    if (bins < 1) {
+        throw std::invalid_argument("sectorDistribution: bins must be at least 1");
+    }
+    const std::size_t sectors = sectorCountOf(analytics);
+    if (sectors == 0U) {
+        throw std::invalid_argument("sectorDistribution: the records carry no sector times");
+    }
+    if (sector >= sectors) {
+        throw std::out_of_range("sectorDistribution: sector " + std::to_string(sector) +
+                                " is not one of the " + std::to_string(sectors) + " sectors");
+    }
+    SectorDistribution d;
+    double sum = 0.0;
+    for (const LapRecord& r : analytics.records()) {
+        if (r.sectorTimes.size() <= sector) {
+            continue;
+        }
+        const double t = r.sectorTimes[sector];
+        if (d.count == 0 || t < d.minimum) d.minimum = t;
+        if (d.count == 0 || d.maximum < t) d.maximum = t;
+        sum += t;
+        ++d.count;
+    }
+    d.histogram.assign(static_cast<std::size_t>(bins), 0);
+    if (d.count == 0) {
+        return d;
+    }
+    d.mean = sum / static_cast<double>(d.count);
+    double squares = 0.0;
+    const double width = (d.maximum - d.minimum) / static_cast<double>(bins);
+    for (const LapRecord& r : analytics.records()) {
+        if (r.sectorTimes.size() <= sector) {
+            continue;
+        }
+        const double t = r.sectorTimes[sector];
+        squares += (t - d.mean) * (t - d.mean);
+        std::size_t bin = 0;
+        if (width > 0.0) {
+            bin = static_cast<std::size_t>((t - d.minimum) / width);
+            bin = std::min(bin, static_cast<std::size_t>(bins) - 1U);  // the maximum lands in the last bin
+        }
+        ++d.histogram[bin];
+    }
+    d.standardDeviation = std::sqrt(squares / static_cast<double>(d.count));
+    return d;
+}
+
+// O(R * S).
+std::vector<SectorComparisonRow> compareSectors(const DriverAnalytics& analytics, int carA,
+                                                int carB) {
+    if (!analytics.contains(carA) || !analytics.contains(carB)) {
+        throw std::out_of_range("compareSectors: both cars must be in the field");
+    }
+    const std::vector<DriverSectorSummary> all = sectorSummaries(analytics);
+    const auto slots = slotsOf(analytics);
+    const DriverSectorSummary& a = all[slots.at(carA)];
+    const DriverSectorSummary& b = all[slots.at(carB)];
+    if (!a.available || !b.available) {
+        throw std::invalid_argument("compareSectors: a car has no sector data");
+    }
+    std::vector<SectorComparisonRow> rows;
+    for (std::size_t k = 0; k < a.fastest.size() && k < b.fastest.size(); ++k) {
+        SectorComparisonRow row;
+        row.sector = k;
+        row.fastestA = a.fastest[k].time;
+        row.fastestB = b.fastest[k].time;
+        row.averageA = a.average[k];
+        row.averageB = b.average[k];
+        row.averageGap = row.averageA - row.averageB;
+        rows.push_back(row);
+    }
+    return rows;
 }
 
 }  // namespace boxbox

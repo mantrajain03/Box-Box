@@ -218,6 +218,23 @@ Status values: **Done** · **In progress** · **Not started**.
 | **FR-8** | **Loop closure.** Optimizer and simulator agree. | In a single-driver, no-overtake race, that driver's final cumulative time equals `StrategyResult::totalTime` within `kClosureTolerance`. **The tolerance must not be loosened to make this pass** — a failure here is a real bug. | **Done** |
 | **FR-9** | **Overtaking (optional).** A deterministic gap-threshold overtake rule. | Fully deterministic — identical input gives identical results across runs; disabled by default; the exact rule is agreed before implementation. Agreed rule: §3.6. | **Done** |
 
+### 4.0 Backend expansion (agreed in `PROJECT DEVELOPMENT PLAN.md`)
+
+Added after FR-1 to FR-9 shipped. Each reuses `PitStrategy`, the shared lap-time model and
+the simulator's records; none re-implements the cost model.
+
+| ID | Requirement | Acceptance criteria | Status |
+| --- | --- | --- | --- |
+| **FR-10** | **Custom strategy evaluation.** Cost a plan entered by the user, with a reason when it is invalid. | `validatePlan` names the first failing condition; totals match a lap-by-lap sum over every plan of 60 seeded races; the distance from the optimum is reported in seconds and per cent. | **Done** |
+| **FR-11** | **Sensitivity sweeps.** Optimal plan as pit loss, or one compound parameter, varies. | Each row equals an independent `optimize()` call; bad ranges are rejected; sweeps are capped at 1000 points. | **Done** |
+| **FR-12** | **Alternative strategies.** The K cheapest distinct plans, cheapest first. | Equal to exhaustive enumeration on small races; entry 0 is the optimizer's plan; distinct; ordered; reproducible; K capped at 50 and the cap is stated to the user. | **Done** |
+| **FR-13** | **Strategy comparison.** Optimum, single-compound plans, best plan per exact stop count and user plans under one cost model, including infeasible ones with a reason. | `bestForStopCount` equals enumeration; the minimum over stop counts equals the optimum. | **Done** |
+| **FR-14** | **Clean air versus traffic.** The same field run with overtaking off and on. | With the rule off every car's time equals its plan's total within `kClosureTolerance`; traffic loss is never negative; positions are a permutation. | **Done** |
+| **FR-15** | **Analytics modules.** Tire profiles and range queries (segment and Fenwick trees), driver analytics (hash map, bounded heap, monotonic deque), the race-event engine and pit analytics. | Each optimized query matches a brute-force reference in `make test`. See `docs/TIRE_MODULE.md`, `docs/DRIVER_ANALYTICS.md`, `docs/EVENT_ENGINE.md`. | **Done** |
+| **FR-16** | **Full event model.** Position-change and overtake-attempt events alongside lap, pit, compound, overtake, hold and finish events. | Every attempt resolves into one pass or hold; each car's position-change chain runs from its grid place to its final classification; the state machine accepts the new types; logging never changes a race time. | **Done** |
+| **FR-17** | **Pit and stint analytics (plan sec. 4.5).** Stint statistics and distribution, stops in order, prefix-sum stop counts and configured windows, interval coverage check, greedy fewest-pit-calls, stop timing comparison, traffic after a stop, undercut / overcut. | Each result is checked against a direct calculation or brute force; the greedy count equals an exhaustive search over every subset of laps. | **Done** |
+| **FR-18** | **Modelled sector analytics (plan sec. 4.3E).** Each lap carries a deterministic split over the track's configured sectors, labelled modelled; per-car and field sector statistics, comparison and distribution. | Sector times add back to the lap time; statistics equal direct calculation on 60 seeded fields; a track or car without sector data is reported as having none. | **Done** |
+
 ### 4.1 CLI requirements
 
 | ID | Requirement | Status |
@@ -230,6 +247,10 @@ Status values: **Done** · **In progress** · **Not started**.
 | CLI-6 | Replay the race from the optimizer's plan and report the FR-8 check, exiting 3 on failure. The check always runs on a solo replay, so rivals and traffic cannot affect it. | **Done** |
 | CLI-7 | Add reference cars on single-compound plans, and log standings every N laps. | **Done** |
 | CLI-8 | Switch on and tune the FR-9 overtaking rule (`--overtake`, `--min-gap`, `--pass-margin`), and show each driver's time lost to traffic. Output is unchanged when the rule is off. | **Done** |
+| CLI-9 | `tires` command group: degradation profile, range and threshold queries. | **Done** |
+| CLI-10 | Race analytics flags: `--events`, `--pit-report`, `--race-laps`, `--driver-stats`, `--top-laps` (with `--top-laps-car` and `--top-laps-range`), `--lap-window`. Each implies `--simulate`; output is unchanged without them. | **Done** |
+| CLI-11 | `strategy` command group: `evaluate`, `compare`, `alternatives`, `sensitivity`, `stops`, `traffic`, `undercut`. Numbers validated and finite; an unrunnable user plan exits 2 with its reason; nothing is printed before the input is accepted. | **Done** |
+| CLI-12 | `--pit-window FROM:TO`, `--sector-stats`, `--sector-compare A:B`, and the extended `--pit-report`; `tires threshold` with both limits lists the legal stint lengths. A non-finite number, a car number outside the race, a pit window past the race distance, or a compound whose fresh-tire lap would take zero or negative time is rejected before anything is printed. | **Done** |
 
 ---
 
@@ -241,7 +262,7 @@ Status values: **Done** · **In progress** · **Not started**.
 | **NFR-2** | **Honest complexity comments.** Every complexity annotation states what the code actually costs. A leaderboard rebuilt each lap is documented at its true per-lap cost, not at the cost of one heap operation. |
 | **NFR-3** | **Independently usable core types.** `Track`, `PitStrategy` and `Leaderboard` are each constructible, usable and testable without a `RaceSimulator` existing. |
 | **NFR-4** | **Zero warnings.** Clean compile under `-std=c++17 -Wall -Wextra`. |
-| **NFR-5** | **Determinism.** Identical input produces byte-identical output. Nothing consults the clock, the environment, an uninitialised value, or an unseeded RNG. DP ties break by a documented, stable rule. |
+| **NFR-5** | **Determinism.** Identical input produces byte-identical output. Nothing consults the clock, the environment, an uninitialised value, or an unseeded RNG. DP ties break by a documented, stable rule. **One exception, approved 2026-11-06:** the benchmark binary built by `make bench` reads `std::chrono::steady_clock` to time runs and for nothing else (no seeding, no code path chosen by time); the core, CLI and tests never read the clock, and a timing is never a pass or fail check. |
 | **NFR-6** | **One build entry point.** The `Makefile` is the only way the project is built. No helper scripts in any language — every executable the project produces is a C++ program. |
 
 ---
@@ -310,7 +331,9 @@ bin/boxbox --laps 4 --pit-loss 5 --sector 10 \
              --compound A:0:1:3 --compound B:2:0:4 --show-table --simulate
 ```
 
-Exit status: `0` success, `1` bad usage, `2` no feasible strategy, `3` FR-8 failed.
+Exit status: `0` success, `1` bad usage, `2` no feasible strategy (or a user-entered
+`strategy` plan that cannot be run), `3` FR-8 failed (or the event log failed its
+state-machine check).
 
 ---
 
@@ -324,6 +347,7 @@ Exit status: `0` success, `1` bad usage, `2` no feasible strategy, `3` FR-8 fail
 | 3 | FR-7, FR-8 loop closure, verified non-vacuous by fault injection. | Complete |
 | 4 | FR-2 min-heap leaderboard, FR-9 "pass or hold" overtaking (rule agreed 2026-09-19, §3.6) and NFR-4 zero warnings. NFR-2 audit fix: `Driver::finished()` re-summed the plan on every call (`O(S)`), which made the `O(1)` / `O(D)` claims above untrue; it is now `O(1)`. | Complete |
 | 5 | `make test` C++ assert harness: 3311 checks, brute-force DP reference, fault-injection verified. | Complete |
+| 5a | Backend expansion (§4.0): tire intelligence, driver analytics, event engine, strategy lab (FR-10 to FR-15), `make bench`. | Complete |
 | 6 | GUI: Dear ImGui with its Win32 + OpenGL3 backends (§9, question 3). | Pending |
 
 ---
@@ -353,6 +377,42 @@ rather than only the first. A non-zero exit fails the target.
 | FR-9 hand cases | Six 3-lap races on flat compounds: equal pace from the grid, held by a slower car, a clear pass, exactly the pass margin, the pit lane not raced, cars on different laps. |
 | FR-9 properties | 30 seeded fields: with the rule off every car runs exactly its own plan; with it on, traffic never makes a car faster and the extra time equals `trafficLoss()` within `kClosureTolerance`; results repeat exactly, including after `reset()`; a lone car still closes FR-8. |
 
+The expansion modules add their own files (`test_tire_module.cpp`,
+`test_driver_analytics.cpp`, `test_events.cpp`, `test_strategy_analysis.cpp`), run by the
+same `make test` and totalled together: 262,435 checks at the time of writing.
+
+| Area | What is checked |
+| --- | --- |
+| FR-10 | Every validation reason; the 4-lap hand case (A2+B2 = 50, B4 = 48, A2+A2 = 47); totals equal a lap-by-lap sum over every plan of 60 seeded races. |
+| FR-11 | 20 seeded pit-loss sweeps and a compound sweep, each row against an independent `optimize()`; zero and huge pit loss; every rejected range. |
+| FR-12 | 60 seeded races: the K cheapest plans against exhaustive enumeration for K = 1, 4, 12, 50; distinct, ordered, reproducible; rank 0 is the optimizer's plan. |
+| FR-13 | `bestForStopCount` against enumeration for every stop count, including infeasible ones; `compoundOnlyBest` against a one-compound `PitStrategy`. |
+| FR-14 | Clean-air totals close against the plans (FR-8 per car); traffic only costs time; a disabled rule changes nothing; a lone car is never held. |
+| Events | Queue pop order equals a full sort; ordering is a strict weak order; every illegal state transition rejected; logging never changes race times. |
+| Drivers | Aggregates against direct calculation; top-K against a full sort; windows against brute force; deterministic ties. |
+| Tires | Both trees against brute force; every cliff boundary; binary search only on a profile that never falls. |
+| Pit analytics (FR-17) | Stint statistics and histogram, prefix-sum stop index against direct counts on 200 random windows, interval coverage, the greedy pit-call count against an exhaustive search over all subsets of laps (150 seeded window sets), traffic after a stop against a direct sum. |
+| Position / attempt events (FR-16) | Each attempt resolves into one pass or hold; each car's position chain starts at its grid place and ends at its final standing; a sink changed or a car added mid-race reseeds the baseline. |
+| Sectors (FR-18) | The split adds back to the lap; hand-worked fastest / average / combined / distribution; 60 seeded fields against direct calculation; mismatched or invalid sector data refused. |
+| CLI handlers (CLI-9 to CLI-12) | Output and exit codes of every command; every usage error exits 1 with nothing on stdout; byte-identical repeat runs; a 1,500-case fuzz of random argument lists. |
+| Structures at scale (plan sec. 11) | 60,000-slot Fenwick, 100,000-value deques, 100,000-event queue and 50,000-entry leaderboard, each with interleaved operations against a plain reference. |
+| Edge cases | Non-finite arguments, plans that do not cover the race, simulator guards, cars with no laps, partial sector data, damaged logs. |
+
+Quality gates recorded in `docs/COMPLEXITY_AUDIT.md`: a stricter warning set (0 warnings in
+`src/` and `cli/`), the suite under bounds-checked containers with signed-overflow traps and at
+`-O3`, `cppcheck` with nothing above style, 99.4% line coverage of the library and CLI handlers,
+14 of 14 second-pass mutants caught, and two independent code reviews whose confirmed defects are
+fixed and regression-tested.
+
+Fault injection on the strategy lab (2026-11-10, throwaway copies, none in the repo):
+reversing the K-best order, adding one second to the swept pit loss, dropping the
+single-stint guard from the stop-count DP, keeping the optimum's duplicate in the
+alternatives, an off-by-one in the maximum stint, flipping the sign of the delta and
+zeroing the traffic loss were each caught (the first and third by aborting the run, the
+others by 5 to 2,139 failed checks). One mutant, charging the pit loss on a plan's single
+stint in the stop-count DP, survived: it adds the same constant to every plan with the
+same stop count, so it changes no choice and no reported time. It is equivalent, not a gap.
+
 The harness was itself checked by fault injection: removing the right-child
 comparison from `siftDown` produced 108 failures, and charging a pit stop after
 the final stint produced 295. Both were reverted.
@@ -374,3 +434,6 @@ off 347, and never summing the cached lap total 691.
 | 2 | What exactly is the FR-9 overtake rule? | **Resolved 2026-09-19 — "pass or hold"** (§3.6). |
 | 3 | GUI route: Dear ImGui + GLFW vendored under `third_party/`, or an ANSI-escape terminal UI? | **Resolved 2026-09-19 — Dear ImGui with its own Win32 + OpenGL3 backends**, vendored as source under `third_party/imgui/`; no GLFW. Probed 2026-09-18 and again 2026-09-19: **GLFW absent** (no headers, no `libglfw3.a`, no DLL, no package). **OpenGL present**, and `-lopengl32 -lgdi32 -ldwmapi -limm32` link with GCC 13.2. This route is all C++, so the build needs no C compiler rule. The GUI will be Windows-only; the core, CLI and tests stay portable. |
 | 4 | Should the cliff model stay, or should degradation be purely linear? | **Open.** Cliff implemented (§3.2); set `cliffLap < 0` to disable per compound. |
+| 5 | Should `RaceLapRecorder` keep a Fenwick tree of per-lap traffic loss? | **Open.** Added 2026-11-10 to meet plan sec. 8.1 item 8; an earlier agreement with Mantra (2026-11-06) preferred none. Additive; nothing depends on it. |
+| 6 | Pit-lane time is not modelled: pit entry, tyre change and exit share one timestamp, so no separate pit-lane duration exists (plan sec. 4.5). | **Open, narrowed 2026-11-10.** Pit-lane time is reported as the lump pit loss (`fieldPitLoss`), and traffic after a stop is reported from the lap records. A real entry / service / exit split would need a change to `Driver` and `RaceSimulator`. |
+| 7 | Do the plan's wording and the code agree everywhere? | **Resolved 2026-11-10.** Every plan item is checked in `docs/PLAN_COMPLIANCE.md`; five deliberate deviations are listed there. |
