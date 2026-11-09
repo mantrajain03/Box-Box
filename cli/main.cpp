@@ -21,11 +21,13 @@
 
 #include "boxbox/Common.hpp"
 #include "boxbox/Driver.hpp"
+#include "boxbox/DriverAnalytics.hpp"
 #include "boxbox/PitStrategy.hpp"
 #include "boxbox/RaceLapAnalytics.hpp"
 #include "boxbox/RaceSimulator.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
+#include "DriverReport.hpp"
 #include "RaceLapReport.hpp"
 #include "TireCommands.hpp"
 
@@ -228,6 +230,16 @@ void printUsage(std::ostream& out) {
         "  --pass-margin SECONDS   Lap-time advantage needed to pass.\n"
         "                          Default " << formatSeconds(defaults.passMargin, 1) << ". Implies --overtake.\n"
         "\n"
+        "Driver analytics (each implies --simulate):\n"
+        "  --driver-stats          Each car's race time split into green-flag, pit\n"
+        "                          and traffic time; average, best and worst lap;\n"
+        "                          stints, positions, and pace and consistency\n"
+        "                          rankings.\n"
+        "  --top-laps K            The K fastest and K slowest laps of the race,\n"
+        "                          and the fastest lap on each compound.\n"
+        "  --lap-window W          Each car's quickest and slowest run of W laps,\n"
+        "                          and its widest lap-time spread within W laps.\n"
+        "\n"
         "Tire analytics:\n"
         "  tires COMMAND ...       Degradation profiles, range queries and\n"
         "                          threshold queries for the compound set above.\n"
@@ -245,6 +257,7 @@ void printUsage(std::ostream& out) {
         "  boxbox --laps 50 --pit-loss 22.0\n"
         "  boxbox --laps 50 --rivals --lap-log 10\n"
         "  boxbox --laps 50 --rivals --overtake --lap-log 10\n"
+        "  boxbox --laps 50 --rivals --overtake --driver-stats --top-laps 5\n"
         "  boxbox --laps 4 --pit-loss 5 --sector 10 \\\n"
         "           --compound A:0:1:3 --compound B:2:0:4 --show-table\n";
 }
@@ -463,6 +476,9 @@ struct Options {
     int lapLog = 0;
     int raceLapsFrom = 0;  // --race-laps FROM:TO; 0 means not requested
     int raceLapsTo = 0;
+    bool driverStats = false;  // --driver-stats
+    int topLaps = 0;           // --top-laps K; 0 means not requested
+    int lapWindow = 0;         // --lap-window W; 0 means not requested
     OvertakeRule overtake;  // validated by the core, in RaceSimulator::setOvertakeRule
     bool showHelp = false;
     bool tires = false;                  // `tires` subcommand given
@@ -544,6 +560,21 @@ Options parseArguments(int argc, char** argv) {
             options.raceLapsTo = parseInt(parts[1], "--race-laps TO");
             if (options.raceLapsFrom < 1 || options.raceLapsFrom > options.raceLapsTo) {
                 throw std::invalid_argument("--race-laps: need 1 <= FROM <= TO");
+            }
+            options.simulate = true;
+        } else if (arg == "--driver-stats") {
+            options.driverStats = true;
+            options.simulate = true;
+        } else if (arg == "--top-laps") {
+            options.topLaps = parseInt(requireValue(argc, argv, i, arg), "--top-laps");
+            if (options.topLaps < 1) {
+                throw std::invalid_argument("--top-laps: must be at least 1");
+            }
+            options.simulate = true;
+        } else if (arg == "--lap-window") {
+            options.lapWindow = parseInt(requireValue(argc, argv, i, arg), "--lap-window");
+            if (options.lapWindow < 1) {
+                throw std::invalid_argument("--lap-window: must be at least 1 lap");
             }
             options.simulate = true;
         } else if (arg == "--overtake") {
@@ -673,20 +704,33 @@ int main(int argc, char** argv) {
                 recorder.emplace(simulator);
             }
 
+            // Driver analytics: another outside observer, recording every
+            // car's laps. Without one of its flags it does not exist either.
+            std::optional<boxbox::LapRecorder> lapRecorder;
+            if (options.driverStats || options.topLaps > 0 || options.lapWindow > 0) {
+                lapRecorder.emplace(simulator);
+            }
+            const auto observeLap = [&]() {
+                if (recorder) {
+                    recorder->observe(simulator);
+                }
+                if (lapRecorder) {
+                    lapRecorder->observe(simulator);
+                }
+            };
+
             if (options.lapLog > 0) {
                 while (simulator.advanceLap()) {
-                    if (recorder) {
-                        recorder->observe(simulator);
-                    }
+                    observeLap();
                     if (simulator.lapsRun() % options.lapLog == 0 || simulator.finished()) {
                         std::ostringstream heading;
                         heading << "After lap " << simulator.lapsRun();
                         printStandings(simulator, heading.str());
                     }
                 }
-            } else if (recorder) {
+            } else if (recorder || lapRecorder) {
                 while (simulator.advanceLap()) {
-                    recorder->observe(simulator);
+                    observeLap();
                 }
                 printStandings(simulator, "Final classification");
             } else {
@@ -697,6 +741,21 @@ int main(int argc, char** argv) {
             if (recorder) {
                 boxbox::printRaceLapReport(std::cout, simulator, *recorder, options.raceLapsFrom,
                                            options.raceLapsTo);
+            }
+
+            if (lapRecorder) {
+                const boxbox::DriverAnalytics analytics(*lapRecorder);
+                if (options.driverStats) {
+                    boxbox::printDriverStats(std::cout, simulator, analytics);
+                }
+                if (options.topLaps > 0) {
+                    boxbox::printTopLaps(std::cout, simulator, analytics,
+                                         static_cast<std::size_t>(options.topLaps));
+                }
+                if (options.lapWindow > 0) {
+                    boxbox::printLapWindows(std::cout, analytics,
+                                            static_cast<std::size_t>(options.lapWindow));
+                }
             }
 
             // FR-8 is defined on a single-driver, no-overtake race. Replay the

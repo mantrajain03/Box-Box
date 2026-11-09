@@ -30,6 +30,7 @@
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 
+#include "DriverAnalyticsTests.hpp"
 #include "TireModuleTests.hpp"
 
 namespace {
@@ -1434,6 +1435,10 @@ int main() {
     const TireTestTally tires = runTireModuleTests();
     g_checks += tires.checks;
     g_failures += tires.failures;
+
+    const DriverTestTally drivers = runDriverAnalyticsTests();
+    g_checks += drivers.checks;
+    g_failures += drivers.failures;
 
     std::cout << "\n---------------------\n";
     std::cout << g_checks << " checks, " << g_failures << " failed\n";

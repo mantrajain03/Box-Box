@@ -1,0 +1,236 @@
+#include "DriverReport.hpp"
+
+#include <cstddef>
+#include <iomanip>
+#include <ostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "boxbox/Common.hpp"
+
+namespace boxbox {
+
+namespace {
+
+std::string seconds(double value) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << value;
+    return out.str();
+}
+
+std::string lapSpan(int firstLap, int lastLap) {
+    return std::to_string(firstLap) + "-" + std::to_string(lastLap);
+}
+
+std::string compoundName(const RaceSimulator& simulator, std::size_t index) {
+    if (index < simulator.compounds().size()) {
+        return simulator.compounds()[index].name();
+    }
+    return "compound " + std::to_string(index);
+}
+
+/// The car-number and driver columns every table starts with.
+void carColumns(std::ostream& out, const std::string& number, const std::string& name) {
+    out << "  " << std::right << std::setw(4) << number << "  " << std::left << std::setw(16)
+        << name << std::right;
+}
+
+void carColumns(std::ostream& out, const DriverSummary& s) {
+    carColumns(out, std::to_string(s.driverNumber), s.name);
+}
+
+void printRanking(std::ostream& out, const DriverAnalytics& analytics, RankMetric metric,
+                  const std::string& title, const std::string& column) {
+    out << "  " << title << '\n';
+    out << "  " << std::right << std::setw(4) << "rank" << std::setw(5) << "#" << "  " << std::left
+        << std::setw(16) << "driver" << std::right << std::setw(10) << column << '\n';
+
+    const std::vector<int> order = rankDrivers(analytics.summaries(), metric);
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        const DriverSummary& s = analytics.summary(order[i]);
+        out << "  " << std::right << std::setw(4) << (i + 1U) << std::setw(5) << s.driverNumber
+            << "  " << std::left << std::setw(16) << s.name << std::right << std::setw(10)
+            << (s.laps > 0 ? seconds(rankValue(s, metric)) : std::string("-")) << '\n';
+    }
+    out << '\n';
+}
+
+void printLapTable(std::ostream& out, const RaceSimulator& simulator,
+                   const DriverAnalytics& analytics, const std::vector<LapRecord>& laps) {
+    out << "  " << std::right << std::setw(4) << "rank" << std::setw(5) << "lap" << std::setw(5)
+        << "#" << "  " << std::left << std::setw(16) << "driver" << std::setw(10) << "compound"
+        << std::right << std::setw(5) << "age" << std::setw(11) << "lap time" << '\n';
+    for (std::size_t i = 0; i < laps.size(); ++i) {
+        const LapRecord& r = laps[i];
+        out << "  " << std::right << std::setw(4) << (i + 1U) << std::setw(5) << r.lap
+            << std::setw(5) << r.driverNumber << "  " << std::left << std::setw(16)
+            << analytics.summary(r.driverNumber).name << std::setw(10)
+            << compoundName(simulator, r.compoundIndex) << std::right << std::setw(5) << r.tireAge
+            << std::setw(11) << seconds(r.lapTime) << '\n';
+    }
+}
+
+}  // namespace
+
+void printDriverStats(std::ostream& out, const RaceSimulator& simulator,
+                      const DriverAnalytics& analytics) {
+    const std::vector<DriverSummary>& cars = analytics.summaries();
+
+    out << "Driver statistics   from the recorded laps, in seconds\n"
+        << "  race time = green-flag time + pit time. traffic is the part of the\n"
+        << "  green-flag time lost behind other cars: lap times include it and\n"
+        << "  leave pit loss out.\n\n";
+
+    carColumns(out, "#", "driver");
+    out << std::setw(6) << "laps" << std::setw(13) << "race time" << std::setw(13) << "green-flag"
+        << std::setw(11) << "pit time" << std::setw(10) << "traffic" << std::setw(7) << "stops"
+        << '\n';
+    for (const DriverSummary& s : cars) {
+        carColumns(out, s);
+        out << std::setw(6) << s.laps << std::setw(13) << seconds(s.totalTime) << std::setw(13)
+            << seconds(s.greenTime) << std::setw(11) << seconds(s.pitTime) << std::setw(10)
+            << seconds(s.trafficTime) << std::setw(7) << s.stops << '\n';
+    }
+    out << '\n';
+
+    carColumns(out, "#", "driver");
+    out << std::setw(10) << "avg lap" << std::setw(10) << "best" << std::setw(6) << "lap"
+        << std::setw(10) << "worst" << std::setw(6) << "lap" << std::setw(9) << "range"
+        << std::setw(10) << "mean dev" << '\n';
+    for (const DriverSummary& s : cars) {
+        carColumns(out, s);
+        if (s.laps == 0) {
+            out << std::setw(10) << "-" << '\n';
+            continue;
+        }
+        out << std::setw(10) << seconds(s.averageLap) << std::setw(10) << seconds(s.bestLap.lapTime)
+            << std::setw(6) << s.bestLap.lap << std::setw(10) << seconds(s.worstLap.lapTime)
+            << std::setw(6) << s.worstLap.lap << std::setw(9) << seconds(s.lapRange)
+            << std::setw(10) << seconds(s.meanAbsDeviation) << '\n';
+    }
+    out << "  avg lap = green-flag time / laps. range = worst - best. mean dev = the\n"
+        << "  mean absolute deviation of a car's laps from its own avg lap.\n\n";
+
+    out << "  Stints   compound and laps\n";
+    for (const DriverSummary& s : cars) {
+        carColumns(out, s);
+        if (s.stints.empty()) {
+            out << "-";
+        }
+        for (std::size_t i = 0; i < s.stints.size(); ++i) {
+            const StintSummary& stint = s.stints[i];
+            out << (i > 0U ? ", " : "") << compoundName(simulator, stint.compoundIndex) << ' '
+                << lapSpan(stint.firstLap, stint.lastLap);
+        }
+        if (!s.compounds.empty()) {
+            out << "   (";
+            for (std::size_t i = 0; i < s.compounds.size(); ++i) {
+                out << (i > 0U ? ", " : "") << compoundName(simulator, s.compounds[i].compoundIndex)
+                    << ' ' << s.compounds[i].laps;
+            }
+            out << " laps)";
+        }
+        out << '\n';
+    }
+    out << '\n';
+
+    out << "  Running position after each lap   best / worst / final\n";
+    for (const DriverSummary& s : cars) {
+        carColumns(out, s);
+        if (s.positions.empty()) {
+            out << "-\n";
+            continue;
+        }
+        out << 'P' << s.bestPosition << " / P" << s.worstPosition << " / P" << s.positions.back()
+            << '\n';
+    }
+    out << '\n';
+
+    printRanking(out, analytics, RankMetric::AverageLap, "Pace ranking   avg lap, lower first",
+                 "avg lap");
+    printRanking(out, analytics, RankMetric::MeanAbsDeviation,
+                 "Consistency ranking   mean dev, lower first", "mean dev");
+    out << "  Equal values rank by car number; a car with no laps ranks last.\n\n";
+
+    out << "  Sector times: not recorded. The simulator times whole laps only, and\n"
+        << "  the sectors under Race setup are track configuration, not a\n"
+        << "  measurement of any car.\n\n";
+}
+
+void printTopLaps(std::ostream& out, const RaceSimulator& simulator,
+                  const DriverAnalytics& analytics, std::size_t k) {
+    const std::vector<LapRecord>& all = analytics.records();
+    if (all.empty()) {
+        out << "Fastest and slowest laps   no laps were run\n\n";
+        return;
+    }
+
+    const std::vector<LapRecord> fastest = selectLaps(all, k, LapOrder::Fastest);
+    const std::vector<LapRecord> slowest = selectLaps(all, k, LapOrder::Slowest);
+
+    out << "Fastest " << fastest.size() << " of " << all.size()
+        << " laps   lap times include traffic, not pit loss\n";
+    printLapTable(out, simulator, analytics, fastest);
+    out << "\nSlowest " << slowest.size() << " of " << all.size() << " laps\n";
+    printLapTable(out, simulator, analytics, slowest);
+    out << "  Equal lap times are listed by lap, then car number.\n\n";
+
+    out << "Fastest lap on each compound\n";
+    for (std::size_t c = 0; c < simulator.compounds().size(); ++c) {
+        LapFilter onCompound;
+        onCompound.compoundIndex = c;
+        const std::vector<LapRecord> best = selectLaps(all, 1U, LapOrder::Fastest, onCompound);
+        out << "  " << std::left << std::setw(12) << simulator.compounds()[c].name() << std::right;
+        if (best.empty()) {
+            out << std::setw(9) << "not run" << '\n';
+            continue;
+        }
+        const LapRecord& r = best.front();
+        out << std::setw(9) << seconds(r.lapTime) << "   lap " << r.lap << "   #" << r.driverNumber
+            << ' ' << analytics.summary(r.driverNumber).name << "   tire age " << r.tireAge << '\n';
+    }
+    out << '\n';
+}
+
+void printLapWindows(std::ostream& out, const DriverAnalytics& analytics, std::size_t window) {
+    const std::string w = std::to_string(window);
+    out << "Rolling " << w << "-lap windows   lap times include traffic, not pit loss\n"
+        << "  quickest / slowest = the " << w << " laps in a row with the lowest / highest\n"
+        << "  average lap. drop-off = slowest - quickest. spread = slowest lap minus\n"
+        << "  fastest lap within one window, shown for the window where it is widest.\n\n";
+
+    carColumns(out, "#", "driver");
+    out << std::setw(10) << "quickest" << std::setw(9) << "laps" << std::setw(10) << "slowest"
+        << std::setw(9) << "laps" << std::setw(10) << "drop-off" << std::setw(9) << "spread"
+        << std::setw(9) << "laps" << '\n';
+
+    bool anyShort = false;
+    for (const DriverSummary& s : analytics.summaries()) {
+        carColumns(out, s);
+        if (s.laps == 0) {
+            out << std::setw(10) << "-" << '\n';
+            continue;
+        }
+        const WindowSummary ws = summarizeWindows(analytics.lapTimes(s.driverNumber), window);
+        out << std::setw(10) << seconds(ws.quickest.average) << std::setw(9)
+            << lapSpan(ws.quickest.firstLap, ws.quickest.lastLap) << std::setw(10)
+            << seconds(ws.slowest.average) << std::setw(9)
+            << lapSpan(ws.slowest.firstLap, ws.slowest.lastLap) << std::setw(10)
+            << seconds(ws.dropOff) << std::setw(9) << seconds(ws.widest.spread()) << std::setw(9)
+            << lapSpan(ws.widest.firstLap, ws.widest.lastLap);
+        if (!ws.complete) {
+            out << "  *";
+            anyShort = true;
+        }
+        out << '\n';
+    }
+    if (anyShort) {
+        out << "  * fewer than " << w << " laps: the whole race is the one window.\n";
+    }
+    std::ostringstream tolerance;  // read from the core, never restated here
+    tolerance << std::scientific << std::setprecision(0) << kTimeEpsilon;
+    out << "  Near-equal stretches (within " << tolerance.str() << " s) go to the earliest.\n\n";
+}
+
+}  // namespace boxbox
