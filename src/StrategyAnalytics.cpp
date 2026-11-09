@@ -30,6 +30,42 @@ std::string compoundLabel(const PitStrategy& strategy, std::size_t index) {
 
 }  // namespace
 
+namespace {
+
+/// The first stint of `firstCompound` for `stopLap` laps, then the best way to
+/// run the remaining laps on fresh tires.
+std::vector<PlannedStint> planStoppingAt(const PitStrategy& strategy, std::size_t firstCompound,
+                                         int stopLap) {
+    Track rest = strategy.track();
+    rest.setTotalLaps(strategy.track().totalLaps() - stopLap);
+    const PitStrategy continuation(rest, strategy.compounds());
+
+    std::vector<PlannedStint> plan;
+    plan.push_back(PlannedStint{firstCompound, stopLap});
+    const std::vector<PlannedStint> tail = planOf(continuation.optimize());
+    plan.insert(plan.end(), tail.begin(), tail.end());
+    return plan;
+}
+
+}  // namespace
+
+FirstStopComparison compareFirstStopLaps(const PitStrategy& strategy, int earlierLap, int laterLap) {
+    const int raceLaps = strategy.track().totalLaps();
+    if (earlierLap < 1 || earlierLap >= laterLap || laterLap >= raceLaps) {
+        throw std::invalid_argument(
+            "compareFirstStopLaps: need 1 <= earlier lap < later lap < the " +
+            std::to_string(raceLaps) + " race laps");
+    }
+    FirstStopComparison out;
+    const std::vector<PlannedStint> optimal = planOf(strategy.optimize());
+    out.firstCompound = optimal.empty() ? 0U : optimal.front().compoundIndex;
+    out.earlierPlan = planStoppingAt(strategy, out.firstCompound, earlierLap);
+    out.laterPlan = planStoppingAt(strategy, out.firstCompound, laterLap);
+    out.result = PitAnalytics::compareUndercutOvercut(strategy, out.earlierPlan, out.laterPlan,
+                                                      earlierLap, laterLap);
+    return out;
+}
+
 bool samePlan(const std::vector<PlannedStint>& a, const std::vector<PlannedStint>& b) noexcept {
     if (a.size() != b.size()) {
         return false;
@@ -514,6 +550,13 @@ std::vector<NamedPlan> standardCandidates(const PitStrategy& strategy, int maxSt
     for (const StopCountResult& row : bestForStopCount(strategy, cappedStops)) {
         if (row.feasible) {
             add(row.report.name, row.report.plan);
+        }
+    }
+    // The best plan that uses only one compound, per compound (often the same
+    // plan as "all-<compound>", in which case the earlier name is kept).
+    for (const StrategyReport& only : compoundOnlyBest(strategy)) {
+        if (only.feasible) {
+            add(only.name, only.plan);
         }
     }
     return out;

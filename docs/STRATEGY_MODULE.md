@@ -36,6 +36,7 @@ reason a plan is invalid lives in this module's `validatePlan`, not in a new fie
 | `compoundOnlyBest` | Best plan per single compound | O(C·N·M) |
 | `standardCandidates` / `compareStrategies` | Optimum, each compound alone, best per stop count, plus user plans, all under one model | O(sum of S) + one `optimize()` |
 | `cleanAirVsTraffic(plans, rule)` | The same field run with overtaking off, then on | O(N·D log D) per race |
+| `compareFirstStopLaps(earlier, later)` | Undercut / overcut: stop after lap L or lap M on the optimum's opening compound, then the best continuation on fresh tires (an independent optimize of the remaining laps), costed by `PitAnalytics::compareUndercutOvercut` | two optimize() calls, O(N·C·M) |
 
 N laps, C compounds, M longest stint, S stints in a plan (or stops + 1 where stated),
 P sweep points, D cars, K plans.
@@ -86,7 +87,14 @@ boxbox [race options] strategy sensitivity --pit-loss FROM:TO:STEP
 boxbox [race options] strategy sensitivity --compound NAME --param P --range FROM:TO:STEP
 boxbox [race options] strategy stops [--max N]
 boxbox [race options] strategy traffic [--min-gap SECONDS] [--pass-margin SECONDS]
+boxbox [race options] strategy undercut --earlier-lap L --later-lap M
 ```
+
+`strategy compare` and the standard candidate set now also include the best plan using only each
+compound (`only-<compound>`, from `compoundOnlyBest`; the earlier name is kept when it duplicates
+an `all-<compound>` or `<n>-stop` plan). `strategy undercut` prints both plans and their totals and
+says which stop is faster; a first stint longer than its compound allows is reported as
+infeasible, never as a number. It is a simplified clean-air model and the output says so.
 
 `SPEC` is `NAME:LAPS` or `NAME:FROM-TO` stints, comma separated. A range must start on the
 lap after the previous stint, so a gap or an overlap is an error, not silently reshaped.

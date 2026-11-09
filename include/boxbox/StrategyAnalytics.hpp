@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "boxbox/PitAnalytics.hpp"
 #include "boxbox/PitStrategy.hpp"
 #include "boxbox/RaceSimulator.hpp"
 
@@ -152,8 +153,9 @@ SweepResult compoundSweep(const PitStrategy& strategy, std::size_t compoundIndex
 /// The `count` cheapest DISTINCT plans, cheapest first. Entry 0 is always
 /// PitStrategy::optimize()'s own plan.
 ///
-/// Method: the lap DAG's DP, keeping the `count` best (cost, predecessor)
-/// entries at every lap instead of one, merged from every (compound, length,
+/// Method: the lap DAG's DP, keeping the `count` + 1 best (cost, predecessor)
+/// entries at every lap instead of one (one spare, because the optimizer's own
+/// plan may be among them and is dropped from the tail), merged from every (compound, length,
 /// predecessor rank) candidate. A path is a unique sequence of stints, so
 /// distinct entries are distinct plans. Exact: it is the true K cheapest within
 /// `count`, not a heuristic; the cap is the bound `kMaxAlternatives`. Every
@@ -175,7 +177,9 @@ std::vector<StrategyReport> kBestPlans(const PitStrategy& strategy, std::size_t 
 /// laps allow) is reported infeasible with a reason.
 ///
 /// COST: O(S*N*C*M) time and O(S*N) memory for S = maxStops + 1, plus one
-/// optimize() call (O(N*C*M)) for the reference optimum.
+/// optimize() call (O(N*C*M)) for the reference optimum. S can be as large as N,
+/// so the memory is quadratic in the race length in the worst case (about
+/// 24 bytes per (stop count, lap) cell); the CLI caps --max at the race laps.
 /// \throws std::invalid_argument if maxStops is negative or above the race laps.
 std::vector<StopCountResult> bestForStopCount(const PitStrategy& strategy, int maxStops);
 
@@ -191,7 +195,8 @@ std::vector<StrategyReport> compareStrategies(const PitStrategy& strategy,
                                               const std::vector<NamedPlan>& plans);
 
 /// The standard comparison set: "optimal", one "all-<compound>" single-compound
-/// plan per compound, and the best plan for 0..maxStops stops ("<n>-stop").
+/// plan per compound, the best plan for 0..maxStops stops ("<n>-stop"), and the
+/// best plan using only each compound ("only-<compound>").
 /// Duplicates by plan are removed, keeping the first name.
 std::vector<NamedPlan> standardCandidates(const PitStrategy& strategy, int maxStops);
 
@@ -207,6 +212,29 @@ std::vector<NamedPlan> standardCandidates(const PitStrategy& strategy, int maxSt
 std::vector<TrafficComparisonRow> cleanAirVsTraffic(const PitStrategy& strategy,
                                                     const std::vector<NamedPlan>& plans,
                                                     const OvertakeRule& rule);
+
+/// An undercut / overcut question answered with the project's cost model.
+struct FirstStopComparison {
+    UndercutOvercutResult result;               ///< totals and the delta: later minus earlier, so positive means the earlier stop is faster
+    std::vector<PlannedStint> earlierPlan;
+    std::vector<PlannedStint> laterPlan;
+    std::size_t firstCompound = 0;              ///< the optimum's opening compound, used by both
+};
+
+/// Simplified undercut / overcut (plan sec. 4.5): the same car stops at the end
+/// of `earlierLap`, or `laterLap`, then drives the best continuation. Both
+/// plans open on the optimum's first compound; after the stop, tires are fresh,
+/// so the rest of the race is an independent race of the remaining laps, solved
+/// by PitStrategy::optimize on a copy of the track with that many laps. Both are
+/// costed by PitAnalytics::compareUndercutOvercut, i.e. PitStrategy::evaluatePlan.
+///
+/// Simplified model: clean air, no tire warm-up, no traffic, no real pit-window
+/// rules. A first stint longer than its compound allows makes that plan
+/// infeasible, reported as kUnreachable, never as a number.
+/// COST: three optimize() calls (the full race, to find the opening compound,
+/// and one continuation per plan), each on at most N laps, so O(N*C*M).
+/// \throws std::invalid_argument unless 1 <= earlierLap < laterLap < race laps.
+FirstStopComparison compareFirstStopLaps(const PitStrategy& strategy, int earlierLap, int laterLap);
 
 /// True when two plans are the same list of (compound, laps).
 bool samePlan(const std::vector<PlannedStint>& a, const std::vector<PlannedStint>& b) noexcept;

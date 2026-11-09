@@ -393,6 +393,61 @@ void testFenwickAgainstBruteForce() {
 // DegradationProfile
 // ---------------------------------------------------------------------------
 
+void testFenwickLargeAndSingle() {
+    beginSection("Tire module: Fenwick tree, a single slot and a 60,000-slot interleaved run");
+
+    // One slot.
+    boxbox::FenwickTree one(1);
+    TCHECK(one.size() == 1U);
+    TCHECK_NEAR(one.prefixSum(1), 0.0, 0.0);
+    one.add(0, 2.5);
+    one.add(0, 0.5);
+    TCHECK_NEAR(one.prefixSum(1), 3.0, 0.0);
+    TCHECK_NEAR(one.rangeSum(0, 1), 3.0, 0.0);
+    TCHECK_NEAR(one.rangeSum(1, 1), 0.0, 0.0);
+    TCHECK_THROWS(one.add(1, 1.0), std::out_of_range);
+    TCHECK_THROWS(one.prefixSum(2), std::out_of_range);
+    TCHECK(boxbox::FenwickTree(std::vector<double>{4.0}).prefixSum(1) == 4.0);
+
+    // Large, interleaved updates and queries against a plain array. Values are whole numbers so
+    // every partial sum is exact in a double and the comparison needs no tolerance.
+    const std::size_t n = 60000;
+    std::vector<double> plain(n, 0.0);
+    boxbox::FenwickTree tree(n);
+    Lcg rng(1357ULL);
+    bool agree = true;
+    for (int step = 0; step < 30000; ++step) {
+        const std::size_t index = static_cast<std::size_t>(rng.nextInt(0, static_cast<int>(n) - 1));
+        if (rng.nextInt(0, 2) != 0) {
+            const double delta = static_cast<double>(rng.nextInt(-50, 50));
+            tree.add(index, delta);
+            plain[index] += delta;
+        } else {
+            const std::size_t other = static_cast<std::size_t>(rng.nextInt(0, static_cast<int>(n) - 1));
+            const std::size_t lo = std::min(index, other);
+            const std::size_t hi = std::max(index, other) + 1U;
+            double direct = 0.0;
+            for (std::size_t i = lo; i < hi; ++i) direct += plain[i];
+            agree = agree && tree.rangeSum(lo, hi) == direct;
+            agree = agree && tree.prefixSum(hi) == tree.rangeSum(0, hi);
+        }
+    }
+    TCHECK(agree);
+    double total = 0.0;
+    for (const double v : plain) total += v;
+    TCHECK(tree.prefixSum(n) == total);
+
+    // The linear build agrees with n separate adds on a large array.
+    std::vector<double> values(n);
+    for (double& v : values) v = static_cast<double>(rng.nextInt(-1000, 1000));
+    const boxbox::FenwickTree built(values);
+    boxbox::FenwickTree added(n);
+    for (std::size_t i = 0; i < n; ++i) added.add(i, values[i]);
+    bool same = true;
+    for (std::size_t k = 0; k <= n; k += 997U) same = same && built.prefixSum(k) == added.prefixSum(k);
+    TCHECK(same && built.prefixSum(n) == added.prefixSum(n));
+}
+
 void testProfileHandWorked() {
     beginSection("Tire module: degradation profile, hand-worked compound");
 
@@ -419,6 +474,22 @@ void testProfileHandWorked() {
         TCHECK_NEAR(p.averageLapTime()[k], cost[k] / static_cast<double>(k), kTimeEpsilon);
     }
     TCHECK(p.lapTimeNonDecreasing());
+
+    // Cumulative degradation: running sum of "vs fresh", checked against the stint cost
+    // (stintCost[k] - k * fresh lap), an independent route to the same number.
+    TCHECK(p.cumulativeDegradation().size() == 6U);
+    const std::vector<double> cumulative{0.0, 0.1, 0.3, 0.6, 1.5, 3.0};
+    for (std::size_t a = 0; a < 6U; ++a) {
+        TCHECK_NEAR(p.cumulativeDegradation()[a], cumulative[a], 1e-9);
+        TCHECK_NEAR(p.cumulativeDegradation()[a],
+                    p.stintCost()[a + 1U] - static_cast<double>(a + 1U) * p.lapTime()[0], 1e-9);
+    }
+    // The cliff bites at age 4: the lap jumps 0.6 s (0.1 wear + 0.5 cliff), and the last
+    // legal lap (92.0) is 92.0 - 90.8 = 1.2 s slower than the lap before the cliff (age 3).
+    TCHECK(p.cliffStepSeconds().has_value());
+    TCHECK_NEAR(*p.cliffStepSeconds(), 0.6, 1e-9);
+    TCHECK(p.lapTimeChangeAfterCliff().has_value());
+    TCHECK_NEAR(*p.lapTimeChangeAfterCliff(), 1.2, 1e-9);
 }
 
 void testCliffBoundaries() {
@@ -437,6 +508,8 @@ void testCliffBoundaries() {
     TCHECK(zeroRate.cliffLap() == std::optional<int>(4));
     TCHECK(!zeroRate.cliffActivationAge().has_value());
     TCHECK_NEAR(zeroRate.cliffDegradationPerLap(), 0.0, 0.0);
+    TCHECK(!zeroRate.cliffStepSeconds().has_value());          // no activation, no step
+    TCHECK(!zeroRate.lapTimeChangeAfterCliff().has_value());
     for (std::size_t a = 1; a < 10U; ++a) {
         TCHECK_NEAR(zeroRate.incrementalDegradation()[a], 0.1, kTimeEpsilon);
     }
@@ -446,6 +519,11 @@ void testCliffBoundaries() {
     TCHECK(early.cliffActivationAge() == std::optional<int>(1));
     TCHECK_NEAR(early.cliffDegradationPerLap(), 0.5, 0.0);
     TCHECK_NEAR(early.lapTime()[1] - early.lapTime()[0], 0.6, kTimeEpsilon);
+    TCHECK(early.cliffStepSeconds().has_value());
+    TCHECK_NEAR(*early.cliffStepSeconds(), 0.6, 1e-9);
+    // Activation at age 1: the lap before the cliff is age 0 (90.0), the last legal lap age 4.
+    TCHECK(early.lapTimeChangeAfterCliff().has_value());
+    TCHECK_NEAR(*early.lapTimeChangeAfterCliff(), early.lapTime().back() - early.lapTime()[0], 1e-9);
 
     // Activation on the last legal age, and just past it.
     const DegradationProfile edge = profileOf(TireCompound("edge", 0.0, 0.1, 5, 3, 1.0));
@@ -1388,6 +1466,7 @@ TireTestTally runTireModuleTests() {
     testSegmentTreeUpdateLocality();
     testFenwickBasics();
     testFenwickAgainstBruteForce();
+    testFenwickLargeAndSingle();
     testProfileHandWorked();
     testCliffBoundaries();
     testProfileAgainstSourcesOfTruth();

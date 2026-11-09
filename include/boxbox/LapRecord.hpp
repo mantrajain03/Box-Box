@@ -2,6 +2,7 @@
 #define BOXBOX_LAP_RECORD_HPP
 
 #include <cstddef>
+#include <vector>
 
 namespace boxbox {
 
@@ -27,9 +28,14 @@ namespace boxbox {
 /// Compound, tire age and stint describe the tires the lap was RUN on. For a
 /// lap that ends in a stop they are the old set, not the one fitted after it.
 ///
-/// No sector times: the simulator times whole laps only. The sector times in
-/// Track::sectors() are track configuration, not a measurement of any car
-/// (plan sec. 4.3E), so they are deliberately not copied in here.
+/// Sector times (plan sec. 4.3E). The simulator times whole laps only, so no
+/// sector of any car is ever MEASURED. `sectorTimes`, when present, is a
+/// deterministic MODELLED split of lapTime in proportion to the track's
+/// configured sector durations (Track::sectors()): sector i gets
+/// lapTime * baseTime(i) / baseLapTime, and the last sector takes the
+/// remainder so the parts add back to lapTime. It carries no information the
+/// lap time does not, and every report that shows it says so. Empty means the
+/// record has none (a track with no sectors, or records built by hand).
 struct LapRecord {
     int driverNumber = 0;           ///< car number, as in LeaderboardEntry
     int lap = 0;                    ///< race lap, 1-based (PRD sec. 3.1)
@@ -41,6 +47,7 @@ struct LapRecord {
     int tireAge = 0;                ///< tire age during the lap; 0 on a fresh set
     int stint = 0;                  ///< 0-based stint the lap belongs to
     int position = 0;               ///< running position after the lap, 1 = leader
+    std::vector<double> sectorTimes;  ///< MODELLED split of lapTime; empty when none
 };
 
 }  // namespace boxbox

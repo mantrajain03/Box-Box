@@ -31,6 +31,19 @@ void printTopLaps(std::ostream& out, const RaceSimulator& simulator,
 /// widest lap-time spread within W laps.
 void printLapWindows(std::ostream& out, const DriverAnalytics& analytics, std::size_t window);
 
+/// --sector-stats: each car's fastest and average modelled sector and best
+/// combined lap, the field's best sectors, and each sector's distribution.
+/// Sector times are a MODELLED split of each lap (see LapRecord); the report
+/// says so and prints "no sector data" for a track without sectors.
+void printSectorStats(std::ostream& out, const RaceSimulator& simulator,
+                      const DriverAnalytics& analytics);
+
+/// --sector-compare A:B: sector-by-sector comparison of two cars.
+/// \throws std::invalid_argument if either car is not in the field or has no
+///         sector data.
+void printSectorComparison(std::ostream& out, const RaceSimulator& simulator,
+                           const DriverAnalytics& analytics, int carA, int carB);
+
 }  // namespace boxbox
 
 #endif  // BOXBOX_CLI_DRIVER_REPORT_HPP

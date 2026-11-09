@@ -48,6 +48,7 @@ void RaceSimulator::validatePlan(const std::vector<Stint>& plan) const {
 void RaceSimulator::addDriver(int number, std::string name, std::vector<Stint> plan) {
     validatePlan(plan);
     drivers_.emplace_back(number, std::move(name), std::move(plan));
+    positionsSeeded_ = false;   // the field changed size: reseed the position baseline
 }
 
 // FR-7. The stop laps come from the optimizer's own backtracked plan; nothing
@@ -98,7 +99,16 @@ bool RaceSimulator::advanceLap() {
         return false;
     }
 
-        if (overtakeRule_.enabled) {
+    // The grid order is the baseline the first PositionChange is measured from.
+    if (eventSink_ != nullptr && !positionsSeeded_) {
+        lastPositions_.assign(drivers_.size(), 0);
+        for (const Standing& row : standings()) {
+            lastPositions_[row.driverIndex] = row.position;
+        }
+        positionsSeeded_ = true;
+    }
+
+    if (overtakeRule_.enabled) {
         advanceLapWithTraffic();
     } else {
         for (Driver& driver : drivers_) {
@@ -113,7 +123,32 @@ bool RaceSimulator::advanceLap() {
     }
 
     ++lapsRun_;
+    emitPositionChanges();
     return true;
+}
+
+// Positions are those of RaceSimulator::standings() once every car has
+// completed the lap round, the same definition LapRecord::position uses.
+void RaceSimulator::emitPositionChanges() {
+    if (eventSink_ == nullptr || !positionsSeeded_) {
+        return;
+    }
+    for (const Standing& row : standings()) {
+        const int before = lastPositions_[row.driverIndex];
+        if (row.position == before) {
+            continue;
+        }
+        const Driver& driver = drivers_[row.driverIndex];
+        RaceEvent change;
+        change.type = RaceEventType::PositionChange;
+        change.timestamp = driver.cumulativeTime();
+        change.driverNumber = driver.number();
+        change.lap = driver.lapsCompleted();
+        change.oldPosition = before;
+        change.newPosition = row.position;
+        eventSink_->push(change);
+        lastPositions_[row.driverIndex] = row.position;
+    }
 }
 
 // FR-9, the "pass or hold" rule documented on OvertakeRule.
@@ -194,6 +229,8 @@ void RaceSimulator::reset() {
         driver.reset();
     }
     lapsRun_ = 0;
+    positionsSeeded_ = false;
+    lastPositions_.clear();
 }
 
 // Event emission is a read-only side channel: nothing here touches a Driver,
@@ -216,6 +253,15 @@ void RaceSimulator::emitLapEvents(const Driver& driver,
     eventSink_->push(lapEvent);
 
     if (outcome != TrafficOutcome::Clear) {
+        // The car caught the one ahead: an attempt, resolved by a pass or a hold.
+        RaceEvent attempt;
+        attempt.type = RaceEventType::OvertakeAttempt;
+        attempt.timestamp = driver.cumulativeTime();
+        attempt.driverNumber = driver.number();
+        attempt.lap = driver.lapsCompleted();
+        attempt.otherDriverNumber = other;
+        eventSink_->push(attempt);
+
         RaceEvent traffic;
         traffic.type = outcome == TrafficOutcome::Passed ? RaceEventType::Overtake
                                                          : RaceEventType::TrafficHold;

@@ -154,9 +154,9 @@ void printDriverStats(std::ostream& out, const RaceSimulator& simulator,
                  "Consistency ranking   mean dev, lower first", "mean dev");
     out << "  Equal values rank by car number; a car with no laps ranks last.\n\n";
 
-    out << "  Sector times: not recorded. The simulator times whole laps only, and\n"
-        << "  the sectors under Race setup are track configuration, not a\n"
-        << "  measurement of any car.\n\n";
+    out << "  Sector times: not measured. The simulator times whole laps only; --sector-stats\n"
+        << "  shows a MODELLED split of each lap, and the sectors under Race setup are track\n"
+        << "  configuration, not a measurement of any car.\n\n";
 }
 
 void printTopLaps(std::ostream& out, const RaceSimulator& simulator,
@@ -253,6 +253,96 @@ void printLapWindows(std::ostream& out, const DriverAnalytics& analytics, std::s
     std::ostringstream tolerance;  // read from the core, never restated here
     tolerance << std::scientific << std::setprecision(0) << kTimeEpsilon;
     out << "  Near-equal stretches (within " << tolerance.str() << " s) go to the earliest.\n\n";
+}
+
+namespace {
+
+constexpr const char* kModelledNote =
+    "Sector times are a MODELLED split of each lap in proportion to the track's configured\n"
+    "sector durations. The simulator times whole laps only, so nothing here is a measured\n"
+    "sector performance and it adds no information beyond the lap time.\n\n";
+
+std::string sectorName(const RaceSimulator& simulator, std::size_t index) {
+    const std::vector<Sector>& sectors = simulator.track().sectors();
+    return index < sectors.size() && !sectors[index].name.empty() ? sectors[index].name
+                                                                   : "S" + std::to_string(index + 1U);
+}
+
+}  // namespace
+
+void printSectorStats(std::ostream& out, const RaceSimulator& simulator,
+                      const DriverAnalytics& analytics) {
+    out << "Sector statistics   seconds\n" << kModelledNote;
+
+    const std::vector<DriverSectorSummary> sums = sectorSummaries(analytics);
+    const std::vector<FieldSectorBest> best = fieldBestSectors(analytics);
+    if (best.empty()) {
+        out << "  No sector data: this track has no sectors, or no lap was run.\n\n";
+        return;
+    }
+
+    out << "  Fastest sector of each car (lap in brackets), average, and best combined lap\n";
+    out << "  " << std::right << std::setw(4) << "#" << "  " << std::left << std::setw(16) << "driver"
+        << std::right;
+    for (std::size_t k = 0; k < best.size(); ++k) {
+        out << std::setw(14) << ("fastest " + sectorName(simulator, k)) << std::setw(10)
+            << ("avg " + sectorName(simulator, k));
+    }
+    out << std::setw(12) << "combined" << '\n';
+    for (const DriverSectorSummary& s : sums) {
+        carColumns(out, std::to_string(s.driverNumber), analytics.summary(s.driverNumber).name);
+        if (!s.available) {
+            out << "  -\n";
+            continue;
+        }
+        for (std::size_t k = 0; k < s.fastest.size(); ++k) {
+            out << std::setw(9) << seconds(s.fastest[k].time) << " (" << std::setw(2) << s.fastest[k].lap
+                << ")" << std::setw(10) << seconds(s.average[k]);
+        }
+        out << std::setw(12) << seconds(s.bestCombinedLap) << '\n';
+    }
+
+    out << "\n  Best sector in the field\n";
+    for (std::size_t k = 0; k < best.size(); ++k) {
+        out << "    " << std::left << std::setw(6) << sectorName(simulator, k) << std::right
+            << std::setw(10) << seconds(best[k].time) << "   car " << best[k].driverNumber << ", lap "
+            << best[k].lap << '\n';
+    }
+    out << "    combined " << seconds(fieldBestCombinedLap(analytics)) << " s: the lap the field "
+        << "could post if one car took the best of every sector\n";
+
+    out << "\n  Distribution over every lap of every car (6 bins from fastest to slowest)\n";
+    for (std::size_t k = 0; k < best.size(); ++k) {
+        const SectorDistribution d = sectorDistribution(analytics, k, 6);
+        out << "    " << std::left << std::setw(6) << sectorName(simulator, k) << std::right << "min "
+            << seconds(d.minimum) << "  mean " << seconds(d.mean) << "  max " << seconds(d.maximum)
+            << "  sd " << seconds(d.standardDeviation) << "  bins";
+        for (const int count : d.histogram) {
+            out << ' ' << count;
+        }
+        out << '\n';
+    }
+    out << '\n';
+}
+
+void printSectorComparison(std::ostream& out, const RaceSimulator& simulator,
+                           const DriverAnalytics& analytics, int carA, int carB) {
+    if (!analytics.contains(carA) || !analytics.contains(carB)) {
+        throw std::invalid_argument("--sector-compare: both cars must be in the race");
+    }
+    const std::vector<SectorComparisonRow> rows = compareSectors(analytics, carA, carB);
+    out << "Sector comparison   car " << carA << " against car " << carB << "   seconds\n"
+        << kModelledNote;
+    out << "  " << std::left << std::setw(8) << "sector" << std::right << std::setw(12) << "fastest A"
+        << std::setw(12) << "fastest B" << std::setw(12) << "average A" << std::setw(12)
+        << "average B" << std::setw(12) << "A - B" << '\n';
+    for (const SectorComparisonRow& r : rows) {
+        out << "  " << std::left << std::setw(8) << sectorName(simulator, r.sector) << std::right
+            << std::setw(12) << seconds(r.fastestA) << std::setw(12) << seconds(r.fastestB)
+            << std::setw(12) << seconds(r.averageA) << std::setw(12) << seconds(r.averageB)
+            << std::setw(12) << seconds(r.averageGap) << '\n';
+    }
+    out << "  A negative A - B means car " << carA << " was quicker on average in that sector.\n\n";
 }
 
 }  // namespace boxbox

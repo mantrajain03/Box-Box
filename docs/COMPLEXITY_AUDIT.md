@@ -11,8 +11,9 @@ laps requested, W window, P sweep points.
 
 ## Result
 
-Every `O(...)` annotation in `include/boxbox/` and `src/` was read. Three were wrong or
-incomplete and were fixed in the comment; none was a code change.
+Every `O(...)` annotation in `include/boxbox/` and `src/` was read. Four were wrong or
+incomplete and were fixed in the comment (three in the first pass, one in the second:
+`trafficAfterStops`, below); none was a code change.
 
 | Where | Claim | Verdict |
 |---|---|---|
@@ -38,6 +39,95 @@ incomplete and were fixed in the comment; none was a code change.
 | `DriverAnalytics` | Construct O(D + R) average (worst case O(R·D), stated); lookups O(1) average; `selectLaps` O(R log K) time, O(K) space; `trailingWindows` O(n); `rankDrivers` O(D log D). |
 | `MonotonicDeque` | Construct O(W); `push` O(1) amortised; `extreme` O(1); storage O(W). |
 | `StrategyAnalytics` | See `docs/STRATEGY_MODULE.md`: sweeps O(P·N·C·M); `bestForStopCount` O(S·N·C·M); `compoundOnlyBest` O(C·N·M); `cleanAirVsTraffic` O(N·D log D) per race. |
+
+## Added 2026-11-10 (second pass)
+
+New code in this pass, each claim read against the implementation:
+
+| Where | Claim | Verdict |
+|---|---|---|
+| `RaceSimulator::emitPositionChanges` | one `standings()` call per lap, O(D log D), only with a sink | True: it returns at once with no sink. |
+| `PitAnalytics::stintHistogram` | O(n + B) | True: one pass for the extremes, one to fill. B = (longest − shortest)/width + 1. |
+| `PitAnalytics::buildStopIndex`, `StopLapIndex::stopsInLaps` | O(n + N) build, O(1) query | True: one pass over the log, one prefix pass, two array reads. |
+| `PitAnalytics::windowSummary`, `compareStopTiming`, `fieldPitLoss` | O(n) | True: each scans the log (or builds one summary). |
+| `PitAnalytics::checkStintCoverage`, `minimumStopLaps` | O(S log S), O(W log W) | True: a sort dominates; the walk after it is linear. The greedy is optimal, and is checked against an exhaustive search over every subset of laps. |
+| `PitAnalytics::trafficAfterStops` | O(R log R) | **False as first written, fixed.** The header said O(R + s log s); the per-car sort of laps is O(R log R) and dominates, with one binary search per stop. |
+| `modelledSectorTimes`, `sectorSummaries`, `fieldBestSectors`, `compareSectors` | O(S), O(R·S) | True. `sectorDistribution` is O(R + bins): two passes over R records. |
+| `compareFirstStopLaps` | two `optimize()` calls, O(N·C·M) | True: each continuation is an optimize on at most N laps. |
+| `StrategyAnalytics::kBestPlans` memory | O(N·K + C·M·K) | True (corrected earlier in this audit). |
+
+## Evidence from the bug hunt
+
+| Check | Result |
+|---|---|
+| `-Wall -Wextra` (the project's flags) on the default build, `make test` and `make bench` | 0 warnings |
+| `src/` and `cli/` under `-Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast -Wuseless-cast -Wnull-dereference -Wlogical-op -Wduplicated-cond -Wduplicated-branches -Wcast-qual -Wformat=2 -Wnon-virtual-dtor -Woverloaded-virtual -Wdouble-promotion -Wfloat-conversion -Wundef -Wredundant-decls -Wmissing-declarations` | 0 warnings in 23 files |
+| tests and benchmarks under the same set (shorter list) | only `-Wuseless-cast` on `static_cast<std::size_t>` of a `uint64_t` in test helpers: harmless here and needed on 32-bit targets |
+| full suite at `-O0 -D_GLIBCXX_DEBUG -D_GLIBCXX_ASSERTIONS -ftrapv` (bounds-checked containers, signed-overflow traps) | passes |
+| full suite at `-O3` | passes |
+| `cppcheck --enable=all --inconclusive --check-level=exhaustive` on `src/`, `cli/`, `include/` | no error or warning; one `performance` note (`Leaderboard::push` takes its 24-byte entry by value: left, it is a public signature); the rest are style suggestions (`useStlAlgorithm`, a member that could be static) |
+| line coverage of `src/` and `cli/` (gcov, full suite) | see below |
+| fault injection on the code added in this pass (14 one-line mutants in throwaway copies) | see below |
+
+### Fault injection on the second pass
+
+Fourteen one-line mutants, each built in a throwaway copy and run against the full suite. All
+fourteen were caught (by failed checks, or by aborting the run):
+
+| Mutant | Outcome |
+|---|---|
+| greedy pit-call test uses `<=` for `<` | caught (`test_events.cpp` greedy brute force) |
+| stint coverage misses an overlap | 1 failed check |
+| stop-index prefix off by one | 8 failed |
+| stint histogram bin index wrong | 7 failed |
+| traffic after a stop counts an extra lap | 15 failed |
+| pit window upper bound exclusive | 12 failed |
+| sector split remainder wrong (parts no longer add up) | aborted (record validation) |
+| field best sector tie-break reversed | 97 failed |
+| position baseline never advances | 13 failed |
+| overtake attempt never emitted | 2 failed |
+| state machine rejects a position change | 13 failed |
+| undercut earlier plan built with the later lap | aborted |
+| plan range gap allowed in the CLI parser | 3 failed |
+| cumulative degradation drops a term | 8 failed |
+
+### Independent code review
+
+Two read-only reviewers read the new code. Real defects they found, all fixed and each now
+covered by a regression test in `test_edges.cpp`:
+
+* a one-lap stint lost its compound in the pit summary (the `PitEntry` that closes it is logged
+  before that lap's `LapCompleted`), so every later stint in `--pit-report` carried the wrong
+  compound — it showed under zero pit loss, where every stint is one lap;
+* `RaceSimulator::setEventSink` and `addDriver` left a stale position baseline, so the next
+  `PositionChange` could carry a wrong `oldPosition` or read past the baseline;
+* `fieldBestSectors` could read out of bounds for hand-built records whose cars had different
+  sector counts (now refused when the analytics is built);
+* a last sector of base time 0 could leave a remainder a few 1e-15 below zero, which the
+  record check then rejected;
+* `printPitReport` threw on a stop logged past the race distance or on a negative call window,
+  and left its number formatting on the caller's stream;
+* integer overflow for an extreme histogram bin width or `lapsAfter`, and a long plan
+  accumulator in the CLI parser;
+* output printed before a failure in `strategy alternatives` and `strategy stops`; stale
+  comments about sector analytics and the undercut sign convention.
+
+### Coverage
+
+Every reachable line of the library and the CLI handlers is executed by the suite: 99.4% of
+3,558 lines (gcov, full suite; `JsonWriter` and `ExportCommand`, added in parallel by someone
+else, are outside this audit). The 20 lines that are not, and why none can be reached through
+the public interface:
+
+| Line | Why it stays |
+|---|---|
+| `Driver::completeLap` return on a finished car | private; the simulator never steps a finished car (`advanceLap` stops first) |
+| `LapRecorder`/`DriverAnalytics` fall-through returns (`rankValue` default, `sectorDistribution` empty count) | a switch over a closed enum; a count that `sectorCountOf` already guarantees is non-zero |
+| `PitStrategy::optimize` unreachable-state `continue`s and `return` | every lap is reachable by repeating one-lap stints; they guard a future constraint, as the header says |
+| `RaceSimulator::advanceLap` skipping a finished car | all cars run the same number of laps, so none finishes early |
+| `evaluateAgainst` "evaluatePlan rejected a plan validatePlan accepted" | the two checks are the same conditions; kept so a future change cannot silently disagree |
+| `runSweep` "no feasible plan" | `optimize()` is always feasible for a constructed `PitStrategy` |
+| `kBestPlans` infeasible optimum, `bestForStopCount` positive stops on a 0-lap race | same reason; the latter is excluded by the argument check |
 
 ## Caveats the audit found worth stating
 

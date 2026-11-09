@@ -25,6 +25,7 @@ inline constexpr int kStrategyInfeasible = 2;
 ///     strategy sensitivity --compound NAME --param P --range FROM:TO:STEP
 ///     strategy stops [--max N]
 ///     strategy traffic [--min-gap SECONDS] [--pass-margin SECONDS]
+///     strategy undercut --earlier-lap L --later-lap M
 ///     strategy help
 ///
 /// A plan SPEC is a comma-separated list of NAME:LAPS or NAME:FROM-TO stints,

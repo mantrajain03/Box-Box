@@ -219,10 +219,12 @@ frontend/
   index.html
   css/ theme.css  layout.css  components.css
   js/
+    format.js           number/time formatting only
     store.js            clock (lap, playing, speed), selection state; plain pub/sub
-    router.js           hash routing + keyboard shortcuts
-    charts.js           line, bar, donut, gantt, stint-bar, table helpers (SVG/canvas)
-    algobadge.js        badge + tooltip
+    model.js            read-only lookups into the bundle, colour mapping
+    charts.js           line, bar, donut, stint-bar (SVG/HTML)
+    ui.js               Panel / StatTile / segmented-control markup
+    app.js              shell, hash router, keyboard shortcuts, shared race clock
     pages/ command.js racesim.js strategy.js tires.js drivers.js pit.js battle.js algorithms.js
   data/ bundle.js bundle.json   (generated)
 ```
@@ -248,6 +250,33 @@ make export     # runs boxbox export → frontend/data/bundle.{js,json}
 A. This spec → B. C++ `JsonWriter` + `export` + tests → C. Shell, design system, Command Center →
 D. Race Simulator → E. Strategy Lab → F. Tires → G. Drivers → H. Pit & Events → I. Battle → J. Algorithms →
 K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
+
+## 9a. Implementation notes
+
+**Phase C (shell, design system, Command Center) is built.**
+- Scripts are classic `<script>` tags, not ES modules: browsers block module loading from `file://`.
+- Pages not built yet appear in the rail as disabled items marked SOON (no dead links); they become links
+  when their page registers itself in `BB.pages`.
+- The `ALGO` badge is informational (hover for the explanation). It does not yet link to the Algorithms page.
+- Each exported run carries an `overview` object (fastest lap, mean lap, stops, laps per compound, pit buckets,
+  per-lap field mean/quickest, per-car summaries), computed in C++ from `selectLaps`, `DriverAnalytics` and
+  `PitAnalytics::buildStopIndex`. Lap rows carry `fitted`/`fittedAge`, the tire on the car after the lap.
+- Clicking a standings row focuses that car in the lap-time trend. Navigating to the Drivers page comes with that page.
+- Panel bodies scroll horizontally if their content is wider than the panel, so a wide table cannot widen the page.
+
+**Phase D (Race Sim) is built.**
+- The footer clock has two modes. Lap pages step by lap; the Race Sim declares `clock: 'time'` and runs on
+  continuous race seconds (30 race-seconds per real second at 1x). Previous/next jump to lap boundaries.
+- Each lap row now carries `cross` (when the car crossed the line to end the lap) and `time` (the race clock after
+  the lap, which includes the pit loss if it stopped), and each run carries `duration`. A car is on track from the
+  previous lap's `time` to this lap's `cross`, in the pit lane from `cross` to `time`, and parked at the line once
+  finished. `track.outline` is a generated drawing (`cli/TrackOutline.cpp`), not a real circuit.
+- Between crossings a car moves at uniform speed. The engine models lap times, not speed within a lap, and the
+  sector boundaries sit at each sector's share of the base lap time so the two agree.
+- The engine logs a pit stop (entry, compound change, exit) at one timestamp, the end of the stop, so the event
+  feed shows a stop when the car rejoins; the map shows it in the pit lane for the whole stop.
+- Cars are drawn side by side across the track so identical plans (the optimal car and the all-soft reference share
+  one) stay visible. The Follow selector and a leaderboard click both set the focused car, which zooms the camera.
 
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.

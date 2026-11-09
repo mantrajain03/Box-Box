@@ -25,8 +25,13 @@ time or invents a race outcome, and `RaceSimulator` knows nothing about this mod
   it would have run in clean air. Nothing is counted twice.
 * Compound, tire age and stint describe the tires the lap was **run on**; after a stop the
   driver already shows the new set, so the recorder reads them before the lap.
-* There are no sector times. The simulator times whole laps only, and the sector times on
-  `Track` are configuration, not a measurement of any car (plan sec. 4.3E).
+* Sector times are **modelled, not measured**. The simulator times whole laps only, and the
+  sector times on `Track` are configuration. As plan sec. 4.3E prescribes, `LapRecorder`
+  attaches a deterministic split of each lap in proportion to the track's configured sector
+  durations (`modelledSectorTimes`): sector i gets `lapTime × base(i) / baseLapTime`, and the
+  last sector takes the remainder so the parts add back to the lap. `LapRecord::sectorTimes` is
+  empty when the track has no sectors. Every sector report says it is a modelled split, and it
+  carries no information the lap time does not.
 
 ## Structures and costs
 
@@ -60,13 +65,29 @@ Metrics are project-defined statistics on the simplified model, not real-world p
 scores. `W = 1`, `W = L` and `W > L` are handled explicitly; a car with fewer than W laps shows
 its whole race as the one window and the report marks it.
 
+## Sector analytics (modelled)
+
+| Function | Gives | Cost |
+|---|---|---|
+| `sectorSummaries(analytics)` | per car: fastest time and lap in each sector (earliest lap on ties), average per sector, best combined lap (the sum of the fastest sectors) | O(R·S) |
+| `fieldBestSectors`, `fieldBestCombinedLap` | the best time in each sector over the field and who set it (ties: earlier lap, then lower car number); the lap the field could post if one car took every best sector | O(R·S) |
+| `compareSectors(a, b)` | sector by sector: fastest and average for each car and the average gap | O(R·S) |
+| `sectorDistribution(sector, bins)` | count, minimum, maximum, mean, population standard deviation and an equal-width histogram over every recorded lap | O(R + bins) |
+
+R lap records, S sectors. A car whose records carry no sector times is reported with
+`available == false`, never with invented numbers. CLI: `--sector-stats`, `--sector-compare A:B`.
+Because the split is proportional, the sector statistics are the lap statistics scaled by fixed
+fractions; the report says so rather than presenting them as independent evidence.
+
 ## Input checks
 
 `DriverAnalytics` rejects, with a message naming the car and lap: a lap out of order, a
 non-finite time, negative traffic or pit time, traffic **larger than the lap that contains
 it**, pit time on a lap without a stop, a wrong stint number, a compound change inside a
-stint, and a position outside the field. `MonotonicDeque` rejects a zero window, a window
-above `kMaxWindow` (2^26), and a non-finite value.
+stint, a position outside the field, a sector count that changes from one lap of a car to the
+next, a negative or non-finite sector time, and sector times that do not add up to the lap
+time (relative 1e-9). `MonotonicDeque` rejects a zero window, a window above `kMaxWindow`
+(2^26), and a non-finite value.
 
 ## Tests
 
@@ -77,7 +98,9 @@ determinism. See PRD §8.1.
 
 ## Known limits
 
-* No sector analytics (no measured sector data exists).
+* Sector times are a modelled split, not measured (see above); the contract-10D "optional
+  sector statistics" are `DriverSectorSummary`, computed on demand rather than stored in
+  `DriverSummary`.
 * No Fenwick tree for cumulative driver statistics; the Fenwick-backed traffic-loss queries
   live in `RaceLapRecorder` (`docs/TIRE_MODULE.md`).
 * `pitTime` is taken as `Track::pitLoss()` when the stop count rises, which is what the

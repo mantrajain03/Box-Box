@@ -15,7 +15,7 @@ OPT      ?= -O2
 
 # Assigned with ':=' rather than '?=' so that -std/-Wall/-Wextra always apply
 # even if the environment already exports CXXFLAGS. Use EXTRA_* to add flags.
-CPPFLAGS := -Iinclude $(EXTRA_CPPFLAGS)
+CPPFLAGS := -Iinclude -Icli $(EXTRA_CPPFLAGS)
 CXXFLAGS := $(CXXSTD) $(WARN) $(OPT) $(EXTRA_CXXFLAGS)
 LDFLAGS  := $(EXTRA_LDFLAGS)
 
@@ -72,6 +72,10 @@ TEST_SRC  := $(wildcard tests/*.cpp)
 
 CORE_OBJ  := $(CORE_SRC:%.cpp=$(BUILD_DIR)/%.o)
 CLI_OBJ   := $(CLI_SRC:%.cpp=$(BUILD_DIR)/%.o)
+# Every CLI object except main.o: the command handlers and report printers, which
+# take std::ostream and so can be tested without a process. main.o holds only
+# argument parsing and the entry point.
+CLI_LIB_OBJ := $(filter-out $(BUILD_DIR)/cli/main.o,$(CLI_OBJ))
 TEST_OBJ  := $(TEST_SRC:%.cpp=$(BUILD_DIR)/%.o)
 
 BENCH_SRC := $(wildcard benchmarks/*.cpp)
@@ -103,11 +107,12 @@ $(BUILD_DIR)/%.o: %.cpp
 run: $(CLI_BIN)
 	$(call exe_path,$(CLI_BIN)) $(ARGS)
 
-# Phase 5. A hand-written assert harness linked against the core objects only:
-# it does not build or need the CLI, and it must never depend on the GUI.
-$(TEST_BIN): $(CORE_OBJ) $(TEST_OBJ)
+# Phase 5. A hand-written assert harness linked against the core objects and the
+# CLI command handlers and report printers (not main.o, so no process is needed):
+# the CLI code is tested like everything else. It never depends on the GUI.
+$(TEST_BIN): $(CORE_OBJ) $(CLI_LIB_OBJ) $(TEST_OBJ)
 	@$(call mkdir_p,$(BIN_DIR))
-	$(CXX) $(CXXFLAGS) $(CORE_OBJ) $(TEST_OBJ) -o $@ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(CORE_OBJ) $(CLI_LIB_OBJ) $(TEST_OBJ) -o $@ $(LDFLAGS)
 
 .PHONY: test
 test: $(TEST_BIN)
@@ -122,6 +127,14 @@ $(BENCH_BIN): $(CORE_OBJ) $(BENCH_OBJ)
 .PHONY: bench
 bench: $(BENCH_BIN)
 	$(call exe_path,$(BENCH_BIN))
+
+# Writes the data bundle the web frontend renders (frontend/data/bundle.js and
+# bundle.json). Race options go through ARGS and must precede the word export:
+#   make export ARGS="--laps 60 --pit-loss 20"
+# The default build and make test never depend on this target.
+.PHONY: export
+export: $(CLI_BIN)
+	$(call exe_path,$(CLI_BIN)) $(ARGS) export --out frontend/data
 
 .PHONY: clean
 clean:
@@ -150,6 +163,7 @@ help:
 	@echo   make          Build the core library and the CLI. This is the default.
 	@echo   make test     Build and run the C++ assert harness
 	@echo   make bench    Build and run the algorithm benchmarks
+	@echo   make export   Write the web frontend data bundle to frontend/data
 	@echo   make run      Build then run the CLI. Pass options via ARGS=...
 	@echo   make clean    Remove build/ and bin/
 	@echo   make info     Print the detected toolchain configuration

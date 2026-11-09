@@ -88,7 +88,8 @@ std::vector<boxbox::TireCompound> syntheticCompounds(std::size_t count) {
     std::vector<boxbox::TireCompound> compounds;
     for (std::size_t i = 0; i < count; ++i) {
         const double step = static_cast<double>(i);
-        compounds.emplace_back("C" + std::to_string(i), -0.6 + 0.15 * step, 0.09 - 0.004 * step,
+        // Wear falls as the compound gets harder but stays positive however many are asked for.
+        compounds.emplace_back("C" + std::to_string(i), -0.6 + 0.15 * step, 0.09 / (1.0 + 0.2 * step),
                                20 + static_cast<int>(3 * i), 14 + static_cast<int>(2 * i), 0.18);
     }
     return compounds;
@@ -220,7 +221,8 @@ bool benchEventQueue(const std::string& label, std::size_t events) {
     std::vector<boxbox::RaceEvent> input;
     for (std::size_t i = 0; i < events; ++i) {
         boxbox::RaceEvent e;
-        e.type = static_cast<boxbox::RaceEventType>(rng.next() % 7U);
+        e.type = static_cast<boxbox::RaceEventType>(
+            rng.next() % (static_cast<unsigned>(boxbox::RaceEventType::RaceFinish) + 1U));
         e.timestamp = static_cast<double>(rng.next() % 5000U);  // many equal times
         e.driverNumber = 1 + static_cast<int>(rng.next() % 20U);
         input.push_back(e);
@@ -338,7 +340,9 @@ bool runStrategyBenchmarks() {
     ok = benchOptimizer("small (a real race)", 50, 3) && ok;
     ok = benchOptimizer("medium", 300, 3) && ok;
     ok = benchOptimizer("large", 2000, 3) && ok;
+    ok = benchOptimizer("one compound", 300, 1) && ok;
     ok = benchOptimizer("more compounds", 300, 9) && ok;
+    ok = benchOptimizer("many compounds", 300, 27) && ok;
     ok = benchStintCost(200000) && ok;
     ok = benchKBest(1) && ok;
     ok = benchKBest(5) && ok;

@@ -15,6 +15,8 @@ void RaceState::apply(const RaceEvent& event) {
         case DriverRaceState::Racing:
             switch (event.type) {
                 case RaceEventType::LapCompleted:
+                case RaceEventType::PositionChange:
+                case RaceEventType::OvertakeAttempt:
                 case RaceEventType::Overtake:
                 case RaceEventType::TrafficHold:
                     // stays Racing

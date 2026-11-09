@@ -75,7 +75,10 @@ benchmarks, the only binary that reads the clock. Last validated on Windows with
 | `--min-gap SECONDS` | Closest a car may follow across the line | 0.5 |
 | `--pass-margin SECONDS` | Lap-time advantage needed to pass | 1.0 |
 | `--events` | Print the chronological race event log | off |
-| `--pit-report` | Per-driver stops, stint lengths, compounds and the overall pit window | off |
+| `--pit-report` | Per-driver stops, stint lengths and statistics, stint distribution, stops in order, stint coverage check, fewest pit calls, traffic after each stop | off |
+| `--pit-window FROM:TO` | With the pit report: stops, cars and pit loss in laps FROM to TO (also checked against a prefix-sum count). Implies `--pit-report` | off |
+| `--sector-stats` | Each car's fastest and average sector and best combined lap, the field's best sectors and their distribution. Sector times are a **modelled** split of each lap, not measured | off |
+| `--sector-compare A:B` | Sector-by-sector comparison of cars A and B (same caveat) | off |
 | `--race-laps FROM:TO` | Per-car fastest lap, window total, traffic lost, and position swaps over a lap range | off |
 | `--driver-stats` | Per-car time split (green / pit / traffic), lap statistics, stints, positions, rankings | off |
 | `--top-laps K` | The K fastest and K slowest laps, and the fastest lap on each compound | off |
@@ -103,6 +106,7 @@ bin/boxbox --laps 50 strategy sensitivity --pit-loss 0:30:10
 bin/boxbox --laps 50 strategy sensitivity --compound SOFT --param degradation --range 0.05:0.25:0.1
 bin/boxbox --laps 50 strategy stops --max 3
 bin/boxbox --laps 50 strategy traffic
+bin/boxbox --laps 50 strategy undercut --earlier-lap 15 --later-lap 19
 ```
 
 A plan is `NAME:LAPS` or `NAME:FROM-TO` stints, comma separated, covering the race exactly.
@@ -288,6 +292,10 @@ N = laps, C = compounds, M = longest stint allowed, D = drivers, S = stints in a
 | `bestForStopCount(S)` | O(S·N·C·M) |
 | Pit-loss / compound sweep, P points | O(P·N·C·M) |
 | Event queue: push / pop | O(log E) |
+| Pit analytics: summaries, stint statistics, histogram, chronology | O(n) expected over the log (sorting stops: O(s log s)) |
+| Stops in any lap range (`StopLapIndex`) | O(N) to build, O(1) per query |
+| Greedy fewest pit calls | O(W log W) |
+| Sector statistics | O(R·S) for R lap records, S sectors |
 | Segment / Fenwick tree query and update | O(log n) |
 | Fastest K of L laps | O(L log K) |
 | Sliding-window min / max over L laps | O(L) |
@@ -297,14 +305,15 @@ Every claim in the code was checked against what it does:
 
 ## Tests
 
-`mingw32-make test` builds the test files in `tests/` against the core alone and runs them
+`mingw32-make test` builds the test files in `tests/` against the core and the CLI command
+handlers (everything in `cli/` except `main.cpp`, which only parses arguments) and runs them
 as one harness:
 
 ```
 == Event streams are identical run to run
 
 ---------------------
-254839 checks, 0 failed
+262435 checks, 0 failed
 OK
 ```
 
@@ -327,7 +336,23 @@ exits non-zero. It covers, among other things:
   `test_events.cpp`);
 - the strategy lab (`test_strategy_analysis.cpp`): every plan of 60 seeded small races
   enumerated and costed lap by lap, then compared with `evaluateCustom`, the sweeps,
-  `kBestPlans` and `bestForStopCount`.
+  `kBestPlans`, `bestForStopCount` and the undercut comparison;
+- the pit analytics (stint statistics, prefix-sum stop index, coverage, the greedy
+  pit-call problem against brute force) and the position / attempt events;
+- the modelled sector split and sector analytics against direct calculation;
+- the CLI handlers (`test_cli.cpp`): exit codes, error paths that print nothing to
+  stdout, byte-identical repeat runs, and a 1,500-case fuzz of random argument lists;
+- the structures at scale: a 60,000-slot Fenwick tree, 100,000-value deques,
+  100,000-event and 50,000-entry heaps, with interleaved push / pop against a plain
+  reference (`test_edges.cpp` holds the rejections and degenerate inputs a coverage
+  review found untested).
+
+Beyond the harness: a clean build under a much stricter warning set (`-Wpedantic -Wshadow
+-Wconversion -Wsign-conversion -Wold-style-cast` and more) has no warnings in `src/` or `cli/`;
+the suite also passes with bounds-checked containers and signed-overflow traps
+(`-D_GLIBCXX_DEBUG -ftrapv`) and at `-O3`; `cppcheck` reports nothing above style; and line
+coverage of the library and CLI handlers is above 99% (the rest are defensive guards, listed in
+[`docs/COMPLEXITY_AUDIT.md`](docs/COMPLEXITY_AUDIT.md)).
 
 The tests are themselves checked by fault injection: deliberately broken copies of the
 code must make them fail, and they do. PRD §8.1 lists the mutants and their failure
@@ -344,11 +369,13 @@ include/boxbox/       public headers. Core: Common, LapTime, Track, TireCompound
                       RaceState, PitAnalytics
 src/                  core library: standard library only, no knowledge of any frontend
 cli/                  command-line frontend: main.cpp plus StrategyCommands, TireCommands,
-                      DriverReport, RaceLapReport. Parsing and printing, no algorithms
+                      DriverReport, PitReport, RaceLapReport. Parsing and printing, no algorithms
 tests/                hand-written assert harness: test_main.cpp plus one file per module
+                      (tires, drivers, events, strategy, CLI handlers, edge cases)
 benchmarks/           `make bench` only: range queries, optimizer, event queue, top-K, deque
 docs/                 module notes: STRATEGY_MODULE, TIRE_MODULE, DRIVER_ANALYTICS,
-                      EVENT_ENGINE, COMPLEXITY_AUDIT
+                      EVENT_ENGINE, COMPLEXITY_AUDIT, and PLAN_COMPLIANCE (every plan item
+                      against the code)
 Makefile              the only build entry point
 PRD.md                the specification
 ```
@@ -371,7 +398,7 @@ PRD.md                the specification
 | --- | --- | --- |
 | 0–3 | Scaffold, optimizer, simulation fidelity, loop closure | Done |
 | 4 | Min-heap leaderboard, overtaking rule, zero warnings | Done |
-| 5 | Test harness (3311 checks at the time; 254,839 now across all modules) | Done |
+| 5 | Test harness (3311 checks at the time; 262,435 now across all modules) | Done |
 | 5a | Backend expansion: tire intelligence, driver analytics, event engine, strategy lab, benchmarks | Done — see the module notes in `docs/` |
 | 6 | GUI | Next |
 

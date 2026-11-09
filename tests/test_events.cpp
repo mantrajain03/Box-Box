@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "boxbox/Common.hpp"
+#include "boxbox/DriverAnalytics.hpp"
 #include "boxbox/EventLog.hpp"
 #include "boxbox/EventPriorityQueue.hpp"
 #include "boxbox/PitAnalytics.hpp"
@@ -136,11 +137,12 @@ RaceEvent eventAt(double t, RaceEventType type, int driver, int lap = 1) {
 }
 
 const RaceEventType kAllTypes[] = {
-    RaceEventType::PitEntry,     RaceEventType::CompoundChange, RaceEventType::PitExit,
-    RaceEventType::LapCompleted, RaceEventType::Overtake,       RaceEventType::TrafficHold,
-    RaceEventType::RaceFinish};
+    RaceEventType::PitEntry,       RaceEventType::CompoundChange, RaceEventType::PitExit,
+    RaceEventType::LapCompleted,   RaceEventType::PositionChange, RaceEventType::OvertakeAttempt,
+    RaceEventType::Overtake,       RaceEventType::TrafficHold,    RaceEventType::RaceFinish};
+constexpr int kTypeCount = static_cast<int>(sizeof(kAllTypes) / sizeof(kAllTypes[0]));
 
-RaceEventType randomType(Lcg& rng) { return kAllTypes[rng.nextInt(0, 6)]; }
+RaceEventType randomType(Lcg& rng) { return kAllTypes[rng.nextInt(0, kTypeCount - 1)]; }
 
 /// The hand-worked pit race. One 10 s sector, 6 laps, 5 s pit loss.
 ///   compound A (index 0): +0 s, 1 s/lap wear, stints of up to 3 laps
@@ -358,6 +360,84 @@ void testQueueAgainstSort() {
             ECHECK(q.pop().driverNumber == d);  // equal time + type: driver number decides
         }
     }
+}
+
+void testQueueInterleavedAndLarge() {
+    beginSection("EventPriorityQueue: single event, interleaved push / pop / peek, and 100,000 events");
+
+    // One event.
+    EventPriorityQueue one;
+    one.push(eventAt(3.0, RaceEventType::RaceFinish, 4));
+    ECHECK(one.size() == 1U && one.peek().driverNumber == 4);
+    ECHECK(one.pop().driverNumber == 4);
+    ECHECK(one.empty());
+    ECHECK_THROWS(one.pop(), std::out_of_range);
+
+    // Interleaved: 20,000 mixed operations against a vector scanned for the earliest event.
+    Lcg rng(2025ULL);
+    EventPriorityQueue queue;
+    std::vector<RaceEvent> reference;       // events with the sequence id the queue assigned
+    std::uint64_t nextSequence = 0;
+    const double times[] = {0.0, 1.0, 1.0, 2.5, 7.0, 7.0, 9.0};
+    bool agree = true;
+    for (int step = 0; step < 20000; ++step) {
+        const int action = rng.nextInt(0, 9);
+        if (action < 6 || reference.empty()) {
+            RaceEvent e = eventAt(times[rng.nextInt(0, 6)], randomType(rng), rng.nextInt(1, 5),
+                                  rng.nextInt(1, 30));
+            queue.push(e);
+            e.sequenceId = nextSequence++;
+            reference.push_back(e);
+        } else {
+            std::size_t best = 0;
+            for (std::size_t i = 1; i < reference.size(); ++i) {
+                if (boxbox::eventComesBefore(reference[i], reference[best])) best = i;
+            }
+            if (action < 9) {
+                const RaceEvent popped = queue.pop();
+                agree = agree && popped.sequenceId == reference[best].sequenceId;
+                reference.erase(reference.begin() + static_cast<std::ptrdiff_t>(best));
+            } else {
+                agree = agree && queue.peek().sequenceId == reference[best].sequenceId;
+            }
+        }
+        agree = agree && queue.size() == reference.size();
+    }
+    ECHECK(agree);
+
+    // 100,000 events pushed then popped come out in exactly the sorted order.
+    EventPriorityQueue big;
+    std::vector<RaceEvent> sorted;
+    for (int i = 0; i < 100000; ++i) {
+        RaceEvent e = eventAt(static_cast<double>(rng.nextInt(0, 3000)), randomType(rng),
+                              rng.nextInt(1, 20), rng.nextInt(1, 60));
+        big.push(e);
+        e.sequenceId = static_cast<std::uint64_t>(i);
+        sorted.push_back(e);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const RaceEvent& a, const RaceEvent& b) { return boxbox::eventComesBefore(a, b); });
+    bool inOrder = big.size() == sorted.size();
+    for (std::size_t i = 0; inOrder && i < sorted.size(); ++i) {
+        inOrder = big.pop().sequenceId == sorted[i].sequenceId;
+    }
+    ECHECK(inOrder);
+    ECHECK(big.empty());
+
+    // processUntil on the big queue's worth of data: everything up to t, in order, nothing after.
+    EventPriorityQueue partial;
+    for (int i = 0; i < 5000; ++i) {
+        partial.push(eventAt(static_cast<double>(rng.nextInt(0, 100)), randomType(rng), rng.nextInt(1, 9)));
+    }
+    const std::vector<RaceEvent> early = partial.processUntil(40.0);
+    bool ordered = true;
+    for (std::size_t i = 0; i < early.size(); ++i) {
+        ordered = ordered && early[i].timestamp <= 40.0 + boxbox::kTimeEpsilon;
+        if (i > 0) ordered = ordered && !boxbox::eventComesBefore(early[i], early[i - 1]);
+    }
+    ECHECK(ordered && !early.empty());
+    ECHECK(partial.peek().timestamp > 40.0);
+    ECHECK(early.size() + partial.size() == 5000U);
 }
 
 void testProcessUntil() {
@@ -661,6 +741,96 @@ void testTrafficEvents() {
     }
 }
 
+void testPositionAndAttemptEvents() {
+    beginSection("PositionChange and OvertakeAttempt events");
+
+    const Field f;
+    OvertakeRule busy;
+    busy.enabled = true;
+    busy.minGap = 5.0;
+    busy.passMargin = 0.0;  // a caught car with any pace edge passes: many attempts and passes
+    OvertakeRule held;
+    held.enabled = true;
+    held.minGap = 5.0;
+    held.passMargin = 10.0;  // nobody can pass: attempts all become holds
+
+    for (const OvertakeRule& rule : {OvertakeRule{}, busy, held}) {
+        EventPriorityQueue queue;
+        RaceSimulator sim = buildField(f, &queue, rule);
+        sim.runToFinish();
+        const EventLog log = drain(queue);
+        ECHECK(boxbox::validateEventLog(log).valid);
+
+        // Every attempt is resolved by exactly one pass or hold, on the same car and lap.
+        const std::size_t attempts = countOf(log, RaceEventType::OvertakeAttempt);
+        ECHECK(attempts == countOf(log, RaceEventType::Overtake) + countOf(log, RaceEventType::TrafficHold));
+        if (!rule.enabled) {
+            ECHECK(attempts == 0U);
+        }
+        if (&rule == &held) {
+            ECHECK(countOf(log, RaceEventType::Overtake) == 0U);
+        }
+
+        // Position chains: each change starts where the car's last place ended, the
+        // chain begins at the grid (car-number order), and it ends at the final standings.
+        std::vector<int> gridOrder;
+        for (const boxbox::Driver& d : sim.drivers()) gridOrder.push_back(d.number());
+        std::sort(gridOrder.begin(), gridOrder.end());
+        const std::vector<boxbox::Standing> finalStandings = sim.standings();
+
+        std::size_t changes = 0;
+        for (const boxbox::Driver& driver : sim.drivers()) {
+            int expectedFrom = static_cast<int>(
+                std::find(gridOrder.begin(), gridOrder.end(), driver.number()) - gridOrder.begin()) + 1;
+            int last = expectedFrom;
+            bool chained = true;
+            bool differs = true;
+            for (const RaceEvent& e : log.entriesForDriver(driver.number())) {
+                if (e.type != RaceEventType::PositionChange) continue;
+                ++changes;
+                chained = chained && e.oldPosition == last;
+                differs = differs && e.newPosition != e.oldPosition;
+                last = e.newPosition;
+            }
+            ECHECK(chained);
+            ECHECK(differs);
+            int finalPosition = 0;
+            for (const boxbox::Standing& row : finalStandings) {
+                if (sim.drivers()[row.driverIndex].number() == driver.number()) finalPosition = row.position;
+            }
+            ECHECK(last == finalPosition);
+        }
+        ECHECK(changes == countOf(log, RaceEventType::PositionChange));
+    }
+
+    // Hand case: two cars, the one that stops once loses the lead and regains it.
+    const HandRace h;
+    EventPriorityQueue queue;
+    RaceSimulator sim = buildHandRace(h, &queue);
+    sim.runToFinish();
+    const EventLog log = drain(queue);
+    // Car 7 stops after laps 3 and 5 (5 s each); car 9 (12 s laps, no stops) is 12 s/lap.
+    // After lap 1: 7 at 10 s, 9 at 12 s -> 7 leads. After lap 3: 7 at 33+5 = 38, 9 at 36 -> 9 leads.
+    std::vector<RaceEvent> moves;
+    for (const RaceEvent& e : log.entriesOfType(RaceEventType::PositionChange)) moves.push_back(e);
+    ECHECK(!moves.empty());
+    bool nineTakesLead = false;
+    for (const RaceEvent& e : moves) {
+        if (e.driverNumber == 9 && e.lap == 3 && e.oldPosition == 2 && e.newPosition == 1) nineTakesLead = true;
+    }
+    ECHECK(nineTakesLead);
+
+    // reset() forgets the baseline, so a rerun reproduces the same events.
+    EventPriorityQueue again;
+    RaceSimulator rerun = buildHandRace(h, &again);
+    rerun.runToFinish();
+    const EventLog first = drain(again);
+    rerun.reset();
+    rerun.runToFinish();
+    const EventLog second = drain(again);
+    ECHECK(first.size() == second.size());
+}
+
 void testPitAnalyticsHandCase() {
     beginSection("PitAnalytics: hand-worked race (3 stints, then 1 stint)");
 
@@ -713,6 +883,351 @@ void testPitAnalyticsHandCase() {
     const PitAnalytics none(empty);
     ECHECK(none.allSummaries().empty());
     ECHECK(!none.pitWindow().hasStops);
+}
+
+void testStintStatsAndHistogram() {
+    beginSection("PitAnalytics: stint statistics, histogram and field pit loss");
+
+    const HandRace h;
+    EventPriorityQueue queue;
+    RaceSimulator sim = buildHandRace(h, &queue);
+    sim.runToFinish();
+    const EventLog log = drain(queue);
+    const PitAnalytics analytics(log);
+
+    // Car 7 ran stints of 3, 2, 1 laps; car 9 one of 6.
+    const boxbox::StintStats seven = PitAnalytics::stintStats(analytics.summaryFor(7));
+    ECHECK(seven.count == 3 && seven.shortestLaps == 1 && seven.longestLaps == 3);
+    ECHECK_NEAR(seven.meanLaps, 2.0, 1e-12);
+    const boxbox::StintStats nine = PitAnalytics::stintStats(analytics.summaryFor(9));
+    ECHECK(nine.count == 1 && nine.shortestLaps == 6 && nine.longestLaps == 6);
+    const boxbox::StintStats field = analytics.fieldStintStats();
+    ECHECK(field.count == 4 && field.shortestLaps == 1 && field.longestLaps == 6);
+    ECHECK_NEAR(field.meanLaps, 3.0, 1e-12);
+
+    const boxbox::StintStats none = PitAnalytics::stintStats(DriverPitSummary{});
+    ECHECK(none.count == 0 && none.shortestLaps == 0 && none.longestLaps == 0);
+    ECHECK_NEAR(none.meanLaps, 0.0, 0.0);
+
+    // Lengths 3 2 1 6. Width 1: six bins 1..6. Width 2: [1-2]=2, [3-4]=1, [5-6]=1.
+    const std::vector<boxbox::StintHistogramBin> one = analytics.stintHistogram(1);
+    ECHECK(one.size() == 6U);
+    if (one.size() == 6U) {
+        const int expected[] = {1, 1, 1, 0, 0, 1};
+        for (std::size_t i = 0; i < 6U; ++i) {
+            ECHECK(one[i].count == expected[i]);
+            ECHECK(one[i].firstLaps == static_cast<int>(i) + 1 && one[i].lastLaps == one[i].firstLaps);
+        }
+    }
+    const std::vector<boxbox::StintHistogramBin> two = analytics.stintHistogram(2);
+    ECHECK(two.size() == 3U);
+    if (two.size() == 3U) {
+        ECHECK(two[0].count == 2 && two[0].firstLaps == 1 && two[0].lastLaps == 2);
+        ECHECK(two[1].count == 1 && two[1].firstLaps == 3 && two[1].lastLaps == 4);
+        ECHECK(two[2].count == 1 && two[2].firstLaps == 5 && two[2].lastLaps == 6);
+    }
+    ECHECK(analytics.stintHistogram(100).size() == 1U);
+    ECHECK_THROWS(analytics.stintHistogram(0), std::invalid_argument);
+    ECHECK_THROWS(analytics.stintHistogram(-3), std::invalid_argument);
+    const EventLog empty;
+    ECHECK(PitAnalytics(empty).stintHistogram(3).empty());
+    ECHECK(PitAnalytics(empty).fieldStintStats().count == 0);
+
+    // The whole field: two stops at 5 s each.
+    ECHECK_NEAR(analytics.fieldPitLoss(5.0), 10.0, 1e-12);
+    ECHECK_NEAR(PitAnalytics(empty).fieldPitLoss(5.0), 0.0, 0.0);
+
+    // Seeded field: histogram counts add up, and the stats agree with a direct pass.
+    const Field f;
+    for (const int width : {1, 3, 7}) {
+        OvertakeRule off;
+        EventPriorityQueue q;
+        RaceSimulator s = buildField(f, &q, off);
+        s.runToFinish();
+        const EventLog fl = drain(q);
+        const PitAnalytics a(fl);
+        int total = 0;
+        for (const boxbox::StintHistogramBin& b : a.stintHistogram(width)) total += b.count;
+        ECHECK(total == a.fieldStintStats().count);
+        int stints = 0;
+        for (const boxbox::Driver& d : s.drivers()) stints += static_cast<int>(d.plan().size());
+        ECHECK(total == stints);
+    }
+}
+
+void testChronologicalAndWindows() {
+    beginSection("PitAnalytics: chronological stops, prefix-sum index and window summaries");
+
+    const HandRace h;
+    EventPriorityQueue queue;
+    RaceSimulator sim = buildHandRace(h, &queue);
+    sim.runToFinish();
+    const EventLog log = drain(queue);
+    const PitAnalytics analytics(log);
+
+    const std::vector<boxbox::PitStopRecord> stops = analytics.chronologicalPitStops();
+    ECHECK(stops.size() == 2U);
+    if (stops.size() == 2U) {
+        ECHECK(stops[0].driverNumber == 7 && stops[0].lap == 3);
+        ECHECK_NEAR(stops[0].time, 38.0, 1e-9);
+        ECHECK(stops[0].fromCompound == 0 && stops[0].toCompound == 1);
+        ECHECK(stops[1].driverNumber == 7 && stops[1].lap == 5);
+        ECHECK_NEAR(stops[1].time, 67.0, 1e-9);
+        ECHECK(stops[1].fromCompound == 1 && stops[1].toCompound == 0);
+    }
+
+    // Prefix sums: stops at the end of laps 3 and 5 of 6.
+    const boxbox::StopLapIndex index = analytics.buildStopIndex(6);
+    ECHECK(index.raceLaps() == 6);
+    const int cumulative[] = {0, 0, 0, 1, 1, 2, 2};
+    for (int lap = 0; lap <= 6; ++lap) {
+        ECHECK(index.cumulativeStops(lap) == cumulative[lap]);
+    }
+    ECHECK(index.stopsInLaps(1, 6) == 2);
+    ECHECK(index.stopsInLaps(3, 3) == 1);
+    ECHECK(index.stopsInLaps(4, 5) == 1);
+    ECHECK(index.stopsInLaps(1, 2) == 0);
+    ECHECK_THROWS(index.stopsInLaps(0, 3), std::out_of_range);
+    ECHECK_THROWS(index.stopsInLaps(4, 3), std::out_of_range);
+    ECHECK_THROWS(index.stopsInLaps(1, 7), std::out_of_range);
+    ECHECK_THROWS(index.cumulativeStops(-1), std::out_of_range);
+    ECHECK_THROWS(index.cumulativeStops(7), std::out_of_range);
+    ECHECK_THROWS(analytics.buildStopIndex(4), std::invalid_argument);   // a stop on lap 5
+    ECHECK_THROWS(analytics.buildStopIndex(-1), std::invalid_argument);
+    const EventLog empty;
+    ECHECK(PitAnalytics(empty).buildStopIndex(0).cumulativeStops(0) == 0);
+    ECHECK(PitAnalytics(empty).buildStopIndex(5).stopsInLaps(1, 5) == 0);
+
+    // Window summaries.
+    const boxbox::PitWindowSummary all = analytics.windowSummary(1, 6, 5.0);
+    ECHECK(all.stops == 2 && all.drivers == 1 && all.earliestLap == 3 && all.latestLap == 5);
+    ECHECK_NEAR(all.pitLossTotal, 10.0, 1e-12);
+    const boxbox::PitWindowSummary quiet = analytics.windowSummary(4, 4, 5.0);
+    ECHECK(quiet.stops == 0 && quiet.drivers == 0 && quiet.earliestLap == 0);
+    ECHECK(analytics.windowSummary(5, 100, 5.0).stops == 1);
+    ECHECK_THROWS(analytics.windowSummary(0, 3, 5.0), std::invalid_argument);
+    ECHECK_THROWS(analytics.windowSummary(5, 4, 5.0), std::invalid_argument);
+
+    // Seeded field: the O(1) prefix answer, the scanning summary and a direct count agree.
+    const Field f;
+    OvertakeRule off;
+    EventPriorityQueue q;
+    RaceSimulator s = buildField(f, &q, off);
+    s.runToFinish();
+    const EventLog fl = drain(q);
+    const PitAnalytics a(fl);
+    const boxbox::StopLapIndex idx = a.buildStopIndex(f.track.totalLaps());
+    std::vector<int> stopLaps;
+    for (const boxbox::DriverPitSummary& d : a.allSummaries()) {
+        stopLaps.insert(stopLaps.end(), d.stopLaps.begin(), d.stopLaps.end());
+    }
+    Lcg rng(909ULL);
+    for (int trial = 0; trial < 200; ++trial) {
+        const int from = rng.nextInt(1, f.track.totalLaps());
+        const int to = rng.nextInt(from, f.track.totalLaps());
+        int direct = 0;
+        for (const int lap : stopLaps) direct += (lap >= from && lap <= to) ? 1 : 0;
+        ECHECK(idx.stopsInLaps(from, to) == direct);
+        const boxbox::PitWindowSummary w = a.windowSummary(from, to, f.track.pitLoss());
+        ECHECK(w.stops == direct);
+        ECHECK_NEAR(w.pitLossTotal, static_cast<double>(direct) * f.track.pitLoss(), 1e-9);
+        ECHECK(w.drivers <= static_cast<int>(s.drivers().size()));
+    }
+    ECHECK(idx.stopsInLaps(1, f.track.totalLaps()) == static_cast<int>(stopLaps.size()));
+
+    // Chronological order: nondecreasing in time, and every stop is present.
+    const std::vector<boxbox::PitStopRecord> fieldStops = a.chronologicalPitStops();
+    ECHECK(fieldStops.size() == stopLaps.size());
+    bool sorted = true;
+    bool compoundsKnown = true;
+    for (std::size_t i = 0; i < fieldStops.size(); ++i) {
+        if (i > 0) sorted = sorted && !(fieldStops[i].time < fieldStops[i - 1].time);
+        compoundsKnown = compoundsKnown && fieldStops[i].fromCompound >= 0 && fieldStops[i].toCompound >= 0;
+    }
+    ECHECK(sorted);
+    ECHECK(compoundsKnown);
+}
+
+void testCoverageAndGreedyWindows() {
+    beginSection("PitAnalytics: interval coverage and the greedy stop-window problem");
+
+    using boxbox::StintInterval;
+    const auto tiles = [](std::vector<StintInterval> s, int laps) {
+        return PitAnalytics::checkStintCoverage(std::move(s), laps);
+    };
+    ECHECK(tiles({{1, 3}, {4, 5}}, 5).tiles);
+    ECHECK(tiles({{4, 5}, {1, 3}}, 5).tiles);          // order does not matter
+    ECHECK(tiles({}, 0).tiles);                         // no race, no stints
+    ECHECK(tiles({{1, 1}}, 1).tiles);
+    ECHECK(tiles({{1, 5}}, 5).message.empty());
+    boxbox::CoverageReport r = tiles({{1, 2}, {4, 5}}, 5);
+    ECHECK(!r.tiles && r.message.find("3-3") != std::string::npos);        // gap
+    r = tiles({{1, 3}, {3, 5}}, 5);
+    ECHECK(!r.tiles && r.message.find("overlaps") != std::string::npos);   // overlap
+    r = tiles({{1, 3}}, 5);
+    ECHECK(!r.tiles && r.message.find("4-5") != std::string::npos);        // short
+    r = tiles({{1, 6}}, 5);
+    ECHECK(!r.tiles && r.message.find("past the end") != std::string::npos);
+    r = tiles({{2, 5}}, 5);
+    ECHECK(!r.tiles && r.message.find("1-1") != std::string::npos);        // starts late
+    ECHECK(!tiles({}, 3).tiles);
+    ECHECK(!tiles({{0, 3}}, 3).tiles);                  // laps are 1-based
+    ECHECK(!tiles({{3, 2}}, 3).tiles);                  // reversed interval
+
+    // Every car's reported stints tile the race.
+    const Field f;
+    for (const OvertakeRule& rule : {OvertakeRule{}}) {
+        EventPriorityQueue q;
+        RaceSimulator s = buildField(f, &q, rule);
+        s.runToFinish();
+        const EventLog log = drain(q);
+        const PitAnalytics a(log);
+        for (const boxbox::DriverPitSummary& d : a.allSummaries()) {
+            ECHECK(tiles(PitAnalytics::stintIntervals(d), f.track.totalLaps()).tiles);
+        }
+    }
+
+    // Greedy stabbing. Hand case: [1,3] [2,5] [4,6] need two laps, e.g. 3 and 6.
+    using boxbox::StopWindow;
+    const std::vector<int> hand = PitAnalytics::minimumStopLaps({{1, 1, 3}, {2, 2, 5}, {3, 4, 6}});
+    ECHECK((hand == std::vector<int>{3, 6}));
+    ECHECK(PitAnalytics::minimumStopLaps({}).empty());
+    ECHECK((PitAnalytics::minimumStopLaps({{1, 4, 4}}) == std::vector<int>{4}));
+    ECHECK((PitAnalytics::minimumStopLaps({{1, 2, 9}, {2, 3, 8}, {3, 5, 6}}) == std::vector<int>{6}));
+    ECHECK_THROWS(PitAnalytics::minimumStopLaps({{1, 5, 4}}), std::invalid_argument);
+    ECHECK_THROWS(PitAnalytics::minimumStopLaps({{1, 0, 4}}), std::invalid_argument);
+
+    // Against brute force over every subset of laps 1..9, 150 seeded window sets.
+    Lcg rng(515ULL);
+    for (int trial = 0; trial < 150; ++trial) {
+        std::vector<StopWindow> windows;
+        const int count = rng.nextInt(1, 7);
+        for (int i = 0; i < count; ++i) {
+            const int lo = rng.nextInt(1, 9);
+            windows.push_back(StopWindow{i + 1, lo, rng.nextInt(lo, 9)});
+        }
+        const std::vector<int> greedy = PitAnalytics::minimumStopLaps(windows);
+        const auto stabs = [&](unsigned mask) {
+            for (const StopWindow& w : windows) {
+                bool hit = false;
+                for (int lap = w.earliestLap; lap <= w.latestLap; ++lap) {
+                    hit = hit || (mask >> (lap - 1)) & 1U;
+                }
+                if (!hit) return false;
+            }
+            return true;
+        };
+        int best = 99;
+        for (unsigned mask = 0; mask < (1U << 9); ++mask) {
+            if (stabs(mask)) {
+                int bits = 0;
+                for (unsigned m = mask; m != 0; m >>= 1) bits += static_cast<int>(m & 1U);
+                best = std::min(best, bits);
+            }
+        }
+        ECHECK(static_cast<int>(greedy.size()) == best);
+        unsigned chosenMask = 0;
+        for (const int lap : greedy) chosenMask |= 1U << (lap - 1);
+        ECHECK(stabs(chosenMask));                                  // and it really covers everyone
+        ECHECK(std::is_sorted(greedy.begin(), greedy.end()));
+    }
+}
+
+void testStopTimingAndTrafficAfterStops() {
+    beginSection("PitAnalytics: stop timing comparison and traffic after a stop");
+
+    const HandRace h;
+    EventPriorityQueue queue;
+    RaceSimulator sim = buildHandRace(h, &queue);
+    sim.runToFinish();
+    const EventLog log = drain(queue);
+    const PitAnalytics analytics(log);
+    const boxbox::StopTimingComparison c = analytics.compareStopTiming(7, 9);
+    ECHECK(c.rows.empty() && c.extraStopsA == 2 && c.extraStopsB == 0);
+    const boxbox::StopTimingComparison self = analytics.compareStopTiming(7, 7);
+    ECHECK(self.rows.size() == 2U && self.extraStopsA == 0 && self.extraStopsB == 0);
+    if (self.rows.size() == 2U) {
+        ECHECK(self.rows[0].lapDifference == 0 && self.rows[1].stopIndex == 2);
+    }
+    ECHECK(analytics.compareStopTiming(404, 9).rows.empty());
+
+    // Two cars that stop on different laps.
+    const Field f;
+    OvertakeRule off;
+    EventPriorityQueue q;
+    RaceSimulator s = buildField(f, &q, off);
+    s.runToFinish();
+    const EventLog fl = drain(q);
+    const PitAnalytics a(fl);
+    const boxbox::DriverPitSummary one = a.summaryFor(1);
+    const boxbox::DriverPitSummary two = a.summaryFor(2);
+    const boxbox::StopTimingComparison cmp = a.compareStopTiming(1, 2);
+    const std::size_t shared = std::min(one.stopLaps.size(), two.stopLaps.size());
+    ECHECK(cmp.rows.size() == shared);
+    for (std::size_t i = 0; i < cmp.rows.size(); ++i) {
+        ECHECK(cmp.rows[i].lapA == one.stopLaps[i] && cmp.rows[i].lapB == two.stopLaps[i]);
+        ECHECK(cmp.rows[i].lapDifference == cmp.rows[i].lapA - cmp.rows[i].lapB);
+    }
+    ECHECK(cmp.extraStopsA == static_cast<int>(one.stopLaps.size() - shared));
+
+    // Traffic after a stop, hand worked. Car 5 stops after laps 2 and 4 of 6.
+    const auto lap = [](int car, int number, double traffic, bool stop) {
+        boxbox::LapRecord r;
+        r.driverNumber = car;
+        r.lap = number;
+        r.trafficTime = traffic;
+        r.lapTime = 90.0;
+        r.pitStop = stop;
+        return r;
+    };
+    const std::vector<boxbox::LapRecord> records{
+        lap(5, 1, 0.0, false), lap(8, 1, 0.1, true),  lap(5, 2, 0.0, true),  lap(8, 2, 0.2, false),
+        lap(5, 3, 0.5, false), lap(8, 3, 0.3, false), lap(5, 4, 0.25, true), lap(8, 4, 0.4, false),
+        lap(5, 5, 0.0, false), lap(5, 6, 1.0, false)};
+    const std::vector<boxbox::TrafficAfterStop> after = PitAnalytics::trafficAfterStops(records, 2);
+    ECHECK(after.size() == 3U);
+    if (after.size() == 3U) {
+        // Ordered by car, then stop lap: (5, lap 2), (5, lap 4), (8, lap 1).
+        ECHECK(after[0].driverNumber == 5 && after[0].stopLap == 2 && after[0].lapsConsidered == 2);
+        ECHECK_NEAR(after[0].trafficSeconds, 0.75, 1e-12);      // laps 3 and 4: 0.5 + 0.25
+        ECHECK(after[1].driverNumber == 5 && after[1].stopLap == 4 && after[1].lapsConsidered == 2);
+        ECHECK_NEAR(after[1].trafficSeconds, 1.0, 1e-12);       // laps 5 and 6: 0 + 1.0
+        ECHECK(after[2].driverNumber == 8 && after[2].stopLap == 1 && after[2].lapsConsidered == 2);
+        ECHECK_NEAR(after[2].trafficSeconds, 0.5, 1e-12);       // laps 2 and 3: 0.2 + 0.3
+    }
+    const std::vector<boxbox::TrafficAfterStop> longer = PitAnalytics::trafficAfterStops(records, 5);
+    ECHECK(longer.size() == 3U && longer[1].lapsConsidered == 2);   // the race ends first
+    ECHECK(PitAnalytics::trafficAfterStops({}, 3).empty());
+    ECHECK_THROWS(PitAnalytics::trafficAfterStops(records, 0), std::invalid_argument);
+
+    // Real race with traffic: against a direct sum over the recorded laps.
+    OvertakeRule busy;
+    busy.enabled = true;
+    busy.minGap = 5.0;
+    busy.passMargin = 10.0;
+    RaceSimulator live = buildField(f, nullptr, busy);
+    boxbox::LapRecorder recorder(live);
+    while (live.advanceLap()) recorder.observe(live);
+    for (const int window : {1, 3, 8}) {
+        const std::vector<boxbox::TrafficAfterStop> got =
+            PitAnalytics::trafficAfterStops(recorder.records(), window);
+        std::size_t stopsSeen = 0;
+        for (const boxbox::LapRecord& r : recorder.records()) stopsSeen += r.pitStop ? 1U : 0U;
+        ECHECK(got.size() == stopsSeen);
+        for (const boxbox::TrafficAfterStop& t : got) {
+            double direct = 0.0;
+            int counted = 0;
+            for (const boxbox::LapRecord& r : recorder.records()) {
+                if (r.driverNumber == t.driverNumber && r.lap > t.stopLap && r.lap <= t.stopLap + window) {
+                    direct += r.trafficTime;
+                    ++counted;
+                }
+            }
+            ECHECK_NEAR(t.trafficSeconds, direct, 1e-9);
+            ECHECK(t.lapsConsidered == counted);
+            ECHECK(t.trafficSeconds >= 0.0);
+        }
+    }
 }
 
 void testPitAnalyticsAgainstSimulator() {
@@ -844,6 +1359,7 @@ EventTestTally runEventEngineTests() {
     testEventOrdering();
     testQueueBasics();
     testQueueAgainstSort();
+    testQueueInterleavedAndLarge();
     testProcessUntil();
     testEventLog();
     testRaceState();
@@ -851,7 +1367,12 @@ EventTestTally runEventEngineTests() {
     testSimulatorEvents();
     testEventsDoNotChangeRace();
     testTrafficEvents();
+    testPositionAndAttemptEvents();
     testPitAnalyticsHandCase();
+    testStintStatsAndHistogram();
+    testChronologicalAndWindows();
+    testCoverageAndGreedyWindows();
+    testStopTimingAndTrafficAfterStops();
     testPitAnalyticsAgainstSimulator();
     testUndercutOvercut();
     testDeterminism();

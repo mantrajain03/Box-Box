@@ -25,11 +25,17 @@ namespace boxbox {
 ///
 /// Rationale for CompoundChange before PitExit: a compound change models
 /// tyre fitting, which happens before the car leaves the pit lane.
+///
+/// PositionChange sorts after LapCompleted so a car's lap is logged before the
+/// change of place that lap produced; OvertakeAttempt sorts before the Overtake
+/// or TrafficHold that resolves it.
 enum class RaceEventType {
     PitEntry,
     CompoundChange,
     PitExit,
     LapCompleted,
+    PositionChange,
+    OvertakeAttempt,
     Overtake,
     TrafficHold,
     RaceFinish
@@ -66,15 +72,20 @@ struct RaceEvent {
     int newCompoundIndex = -1;
 
     // --- CompoundChange / PitExit payload ---
-    /// Tire age at the moment of this event. Always 0 for CompoundChange
-    /// (a fresh set is fitted), meaningful as "age of the set just removed"
-    /// is NOT tracked here deliberately - the simulator's Driver already
-    /// owns that. PitExit: age of the newly fitted tire, i.e. 0.
+    /// Age of the tire fitted by the stop, which is always 0 (a fresh set).
+    /// The age of the set that was removed is not recorded here; it is the
+    /// preceding LapCompleted's stint length and the Driver already owns it.
     int tireAgeAtEvent = 0;
 
-    // --- Overtake / TrafficHold payload ---
-    /// The car this event happened relative to (the car passed, or the car
-    /// that caused the hold). -1 when not applicable.
+    // --- PositionChange payload ---
+    /// Running positions (1 = leader) before and after the lap round that
+    /// produced this event. PositionChange only; 0 otherwise.
+    int oldPosition = 0;
+    int newPosition = 0;
+
+    // --- OvertakeAttempt / Overtake / TrafficHold payload ---
+    /// The car this event happened relative to (the car it caught, passed, or
+    /// was held by). -1 when not applicable.
     int otherDriverNumber = -1;
 
     // --- TrafficHold payload ---

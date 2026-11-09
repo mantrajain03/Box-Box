@@ -629,6 +629,67 @@ void testComparisonSets() {
     SCHECK(boxbox::compareStrategies(hand, {}).empty());
 }
 
+void testFirstStopComparison() {
+    beginSection("compareFirstStopLaps: undercut / overcut against enumeration");
+
+    // For a chosen first stop, the best continuation must equal the cheapest enumerated plan
+    // that opens with that same first stint.
+    Lcg rng(77ULL);
+    int compared = 0;
+    for (int trial = 0; trial < 80; ++trial) {
+        const Case c = randomCase(rng, 8);
+        if (c.track.totalLaps() < 3) continue;
+        const PitStrategy strategy(c.track, c.compounds);
+        const int earlier = rng.nextInt(1, c.track.totalLaps() - 2);
+        const int later = rng.nextInt(earlier + 1, c.track.totalLaps() - 1);
+        const boxbox::FirstStopComparison cmp = boxbox::compareFirstStopLaps(strategy, earlier, later);
+
+        SCHECK(cmp.earlierPlan.front().laps == earlier);
+        SCHECK(cmp.laterPlan.front().laps == later);
+        SCHECK(cmp.earlierPlan.front().compoundIndex == cmp.firstCompound);
+        SCHECK(cmp.laterPlan.front().compoundIndex == cmp.firstCompound);
+        SCHECK(cmp.result.earlierStopLap == earlier && cmp.result.laterStopLap == later);
+
+        const std::vector<Ranked> all = allPlans(c.track, c.compounds);
+        const auto bestWithFirst = [&](int laps) {
+            double best = boxbox::kUnreachable;
+            for (const Ranked& r : all) {
+                if (r.plan.front().compoundIndex == cmp.firstCompound && r.plan.front().laps == laps &&
+                    r.plan.size() >= 2U) {
+                    best = std::min(best, r.cost);
+                }
+            }
+            return best;
+        };
+        const double e = bestWithFirst(earlier);
+        const double l = bestWithFirst(later);
+        // A first stint over the compound's limit is infeasible: reported unreachable.
+        const bool eLegal = earlier <= c.compounds[cmp.firstCompound].maxStintLaps();
+        const bool lLegal = later <= c.compounds[cmp.firstCompound].maxStintLaps();
+        SCHECK(boxbox::isReachable(cmp.result.earlierPlanTotalTime) == eLegal);
+        SCHECK(boxbox::isReachable(cmp.result.laterPlanTotalTime) == lLegal);
+        if (eLegal) SCHECK_NEAR(cmp.result.earlierPlanTotalTime, e, 1e-9);
+        if (lLegal) SCHECK_NEAR(cmp.result.laterPlanTotalTime, l, 1e-9);
+        if (eLegal && lLegal) {
+            SCHECK_NEAR(cmp.result.timeDeltaSeconds,
+                        cmp.result.laterPlanTotalTime - cmp.result.earlierPlanTotalTime, 1e-12);
+            ++compared;
+        } else {
+            SCHECK(!boxbox::isReachable(cmp.result.timeDeltaSeconds));
+        }
+    }
+    SCHECK(compared > 10);   // the seeded cases really exercised the comparison
+
+    // Argument checks.
+    const Hand h;
+    const PitStrategy hand(h.track, h.compounds);
+    SCHECK_THROWS(boxbox::compareFirstStopLaps(hand, 0, 2), std::invalid_argument);
+    SCHECK_THROWS(boxbox::compareFirstStopLaps(hand, 2, 2), std::invalid_argument);
+    SCHECK_THROWS(boxbox::compareFirstStopLaps(hand, 3, 2), std::invalid_argument);
+    SCHECK_THROWS(boxbox::compareFirstStopLaps(hand, 1, 4), std::invalid_argument);   // a stop at the flag
+    SCHECK(boxbox::compareFirstStopLaps(hand, 1, 2).earlierPlan.size() >= 2U);
+}
+
 void testCleanAirVsTraffic() {
     beginSection("cleanAirVsTraffic: clean totals close against the plans; traffic only costs time");
 
@@ -729,6 +790,7 @@ StrategyTestTally runStrategyAnalysisTests() {
     testKBestPlans();
     testBestForStopCount();
     testComparisonSets();
+    testFirstStopComparison();
     testCleanAirVsTraffic();
     testLoopClosureRegression();
 

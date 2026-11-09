@@ -231,6 +231,9 @@ the simulator's records; none re-implements the cost model.
 | **FR-13** | **Strategy comparison.** Optimum, single-compound plans, best plan per exact stop count and user plans under one cost model, including infeasible ones with a reason. | `bestForStopCount` equals enumeration; the minimum over stop counts equals the optimum. | **Done** |
 | **FR-14** | **Clean air versus traffic.** The same field run with overtaking off and on. | With the rule off every car's time equals its plan's total within `kClosureTolerance`; traffic loss is never negative; positions are a permutation. | **Done** |
 | **FR-15** | **Analytics modules.** Tire profiles and range queries (segment and Fenwick trees), driver analytics (hash map, bounded heap, monotonic deque), the race-event engine and pit analytics. | Each optimized query matches a brute-force reference in `make test`. See `docs/TIRE_MODULE.md`, `docs/DRIVER_ANALYTICS.md`, `docs/EVENT_ENGINE.md`. | **Done** |
+| **FR-16** | **Full event model.** Position-change and overtake-attempt events alongside lap, pit, compound, overtake, hold and finish events. | Every attempt resolves into one pass or hold; each car's position-change chain runs from its grid place to its final classification; the state machine accepts the new types; logging never changes a race time. | **Done** |
+| **FR-17** | **Pit and stint analytics (plan sec. 4.5).** Stint statistics and distribution, stops in order, prefix-sum stop counts and configured windows, interval coverage check, greedy fewest-pit-calls, stop timing comparison, traffic after a stop, undercut / overcut. | Each result is checked against a direct calculation or brute force; the greedy count equals an exhaustive search over every subset of laps. | **Done** |
+| **FR-18** | **Modelled sector analytics (plan sec. 4.3E).** Each lap carries a deterministic split over the track's configured sectors, labelled modelled; per-car and field sector statistics, comparison and distribution. | Sector times add back to the lap time; statistics equal direct calculation on 60 seeded fields; a track or car without sector data is reported as having none. | **Done** |
 
 ### 4.1 CLI requirements
 
@@ -246,7 +249,8 @@ the simulator's records; none re-implements the cost model.
 | CLI-8 | Switch on and tune the FR-9 overtaking rule (`--overtake`, `--min-gap`, `--pass-margin`), and show each driver's time lost to traffic. Output is unchanged when the rule is off. | **Done** |
 | CLI-9 | `tires` command group: degradation profile, range and threshold queries. | **Done** |
 | CLI-10 | Race analytics flags: `--events`, `--pit-report`, `--race-laps`, `--driver-stats`, `--top-laps` (with `--top-laps-car` and `--top-laps-range`), `--lap-window`. Each implies `--simulate`; output is unchanged without them. | **Done** |
-| CLI-11 | `strategy` command group: `evaluate`, `compare`, `alternatives`, `sensitivity`, `stops`, `traffic`. Numbers validated and finite; an unrunnable user plan exits 2 with its reason; nothing is printed before the input is accepted. | **Done** |
+| CLI-11 | `strategy` command group: `evaluate`, `compare`, `alternatives`, `sensitivity`, `stops`, `traffic`, `undercut`. Numbers validated and finite; an unrunnable user plan exits 2 with its reason; nothing is printed before the input is accepted. | **Done** |
+| CLI-12 | `--pit-window FROM:TO`, `--sector-stats`, `--sector-compare A:B`, and the extended `--pit-report`; `tires threshold` with both limits lists the legal stint lengths. A non-finite number, a car number outside the race, a pit window past the race distance, or a compound whose fresh-tire lap would take zero or negative time is rejected before anything is printed. | **Done** |
 
 ---
 
@@ -375,7 +379,7 @@ rather than only the first. A non-zero exit fails the target.
 
 The expansion modules add their own files (`test_tire_module.cpp`,
 `test_driver_analytics.cpp`, `test_events.cpp`, `test_strategy_analysis.cpp`), run by the
-same `make test` and totalled together: 254,839 checks at the time of writing.
+same `make test` and totalled together: 262,435 checks at the time of writing.
 
 | Area | What is checked |
 | --- | --- |
@@ -387,6 +391,18 @@ same `make test` and totalled together: 254,839 checks at the time of writing.
 | Events | Queue pop order equals a full sort; ordering is a strict weak order; every illegal state transition rejected; logging never changes race times. |
 | Drivers | Aggregates against direct calculation; top-K against a full sort; windows against brute force; deterministic ties. |
 | Tires | Both trees against brute force; every cliff boundary; binary search only on a profile that never falls. |
+| Pit analytics (FR-17) | Stint statistics and histogram, prefix-sum stop index against direct counts on 200 random windows, interval coverage, the greedy pit-call count against an exhaustive search over all subsets of laps (150 seeded window sets), traffic after a stop against a direct sum. |
+| Position / attempt events (FR-16) | Each attempt resolves into one pass or hold; each car's position chain starts at its grid place and ends at its final standing; a sink changed or a car added mid-race reseeds the baseline. |
+| Sectors (FR-18) | The split adds back to the lap; hand-worked fastest / average / combined / distribution; 60 seeded fields against direct calculation; mismatched or invalid sector data refused. |
+| CLI handlers (CLI-9 to CLI-12) | Output and exit codes of every command; every usage error exits 1 with nothing on stdout; byte-identical repeat runs; a 1,500-case fuzz of random argument lists. |
+| Structures at scale (plan sec. 11) | 60,000-slot Fenwick, 100,000-value deques, 100,000-event queue and 50,000-entry leaderboard, each with interleaved operations against a plain reference. |
+| Edge cases | Non-finite arguments, plans that do not cover the race, simulator guards, cars with no laps, partial sector data, damaged logs. |
+
+Quality gates recorded in `docs/COMPLEXITY_AUDIT.md`: a stricter warning set (0 warnings in
+`src/` and `cli/`), the suite under bounds-checked containers with signed-overflow traps and at
+`-O3`, `cppcheck` with nothing above style, 99.4% line coverage of the library and CLI handlers,
+14 of 14 second-pass mutants caught, and two independent code reviews whose confirmed defects are
+fixed and regression-tested.
 
 Fault injection on the strategy lab (2026-11-10, throwaway copies, none in the repo):
 reversing the K-best order, adding one second to the swept pit loss, dropping the
@@ -419,4 +435,5 @@ off 347, and never summing the cached lap total 691.
 | 3 | GUI route: Dear ImGui + GLFW vendored under `third_party/`, or an ANSI-escape terminal UI? | **Resolved 2026-09-19 — Dear ImGui with its own Win32 + OpenGL3 backends**, vendored as source under `third_party/imgui/`; no GLFW. Probed 2026-09-18 and again 2026-09-19: **GLFW absent** (no headers, no `libglfw3.a`, no DLL, no package). **OpenGL present**, and `-lopengl32 -lgdi32 -ldwmapi -limm32` link with GCC 13.2. This route is all C++, so the build needs no C compiler rule. The GUI will be Windows-only; the core, CLI and tests stay portable. |
 | 4 | Should the cliff model stay, or should degradation be purely linear? | **Open.** Cliff implemented (§3.2); set `cliffLap < 0` to disable per compound. |
 | 5 | Should `RaceLapRecorder` keep a Fenwick tree of per-lap traffic loss? | **Open.** Added 2026-11-10 to meet plan sec. 8.1 item 8; an earlier agreement with Mantra (2026-11-06) preferred none. Additive; nothing depends on it. |
-| 6 | Pit-lane time is not modelled: pit entry, tyre change and exit share one timestamp, so no pit-lane duration or traffic-after-stop figure exists (plan sec. 4.5). | **Open.** Would need a deliberate extension to the simulator's stop model. |
+| 6 | Pit-lane time is not modelled: pit entry, tyre change and exit share one timestamp, so no separate pit-lane duration exists (plan sec. 4.5). | **Open, narrowed 2026-11-10.** Pit-lane time is reported as the lump pit loss (`fieldPitLoss`), and traffic after a stop is reported from the lap records. A real entry / service / exit split would need a change to `Driver` and `RaceSimulator`. |
+| 7 | Do the plan's wording and the code agree everywhere? | **Resolved 2026-11-10.** Every plan item is checked in `docs/PLAN_COMPLIANCE.md`; five deliberate deviations are listed there. |

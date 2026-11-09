@@ -1,5 +1,6 @@
 #include "StrategyCommands.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -144,7 +145,7 @@ std::vector<std::string> splitOn(const std::string& text, char separator) {
 /// of being silently reshaped.
 std::vector<PlannedStint> parsePlan(const std::string& spec, const PitStrategy& strategy) {
     std::vector<PlannedStint> plan;
-    int nextLap = 1;
+    long long nextLap = 1;   // wide: many large stints must not overflow int
     for (const std::string& token : splitOn(spec, ',')) {
         const std::vector<std::string> halves = splitOn(token, ':');
         if (halves.size() != 2U || halves[0].empty() || halves[1].empty()) {
@@ -353,9 +354,10 @@ int runAlternatives(const std::vector<std::string>& args, const PitStrategy& str
                                        static_cast<int>(kMaxAlternatives))
                           : 5;
 
+    // Computed before anything is printed, so a failure leaves stdout empty.
+    const std::vector<StrategyReport> best = kBestPlans(strategy, static_cast<std::size_t>(count));
     out << std::fixed << std::setprecision(3);
     printAssumptions(strategy, out);
-    const std::vector<StrategyReport> best = kBestPlans(strategy, static_cast<std::size_t>(count));
     out << "The " << best.size() << " cheapest distinct plans (requested " << count << ", at most "
         << kMaxAlternatives << " allowed). The search is exact up to that bound: these are the\n"
         << "true cheapest plans, not a sample; there is no claim beyond the bound.\n";
@@ -421,12 +423,14 @@ int runStops(const std::vector<std::string>& args, const PitStrategy& strategy,
                              ? parseWhole(parsed.single.at("--max"), "--max", 0, cap)
                              : std::min(4, cap);
 
+    // Computed before anything is printed, so a failure leaves stdout empty.
+    const StrategyResult optimum = strategy.optimize();
+    const std::vector<StopCountResult> rows = bestForStopCount(strategy, maxStops);
     out << std::fixed << std::setprecision(3);
     printAssumptions(strategy, out);
-    const StrategyResult optimum = strategy.optimize();
     out << "Best plan for each exact stop count (optimum overall: " << optimum.stopCount()
         << " stop(s), " << optimum.totalTime << " s)\n\n";
-    for (const StopCountResult& row : bestForStopCount(strategy, maxStops)) {
+    for (const StopCountResult& row : rows) {
         if (!row.feasible) {
             out << row.stops << " stop(s): infeasible - " << row.reason << "\n";
             continue;
@@ -434,6 +438,44 @@ int runStops(const std::vector<std::string>& args, const PitStrategy& strategy,
         out << row.stops << " stop(s): " << std::setw(10) << row.report.totalTime << " s  ("
             << (row.report.deltaVsOptimum >= 0 ? "+" : "") << row.report.deltaVsOptimum << " s)  "
             << planText(strategy, row.report.plan) << "\n";
+    }
+    out << "\n";
+    return kStrategyOk;
+}
+
+int runUndercut(const std::vector<std::string>& args, const PitStrategy& strategy,
+                std::ostream& out) {
+    const ParsedOptions parsed = parseOptions(args);
+    allowOnly(parsed, {"--earlier-lap", "--later-lap"}, false);
+    const int cap = std::max(strategy.track().totalLaps(), 0);
+    const int earlier = parseWhole(requireOpt(parsed, "--earlier-lap"), "--earlier-lap", 1, cap);
+    const int later = parseWhole(requireOpt(parsed, "--later-lap"), "--later-lap", 1, cap);
+
+    const FirstStopComparison cmp = compareFirstStopLaps(strategy, earlier, later);
+    out << std::fixed << std::setprecision(3);
+    printAssumptions(strategy, out);
+    out << "Undercut / overcut: the same car stops at the end of lap " << earlier << " or lap "
+        << later << ", on the optimum's opening compound, then drives the best continuation on\n"
+        << "fresh tires. Simplified model: clean air, no tire warm-up, no traffic.\n\n";
+    const auto line = [&](const char* label, int lap, const std::vector<PlannedStint>& plan,
+                          double total) {
+        out << label << " (stop after lap " << lap << "): " << planText(strategy, plan) << "\n  ";
+        if (isReachable(total)) {
+            out << "total " << total << " s\n";
+        } else {
+            out << "infeasible (the first stint is longer than its compound allows)\n";
+        }
+    };
+    line("Earlier stop", earlier, cmp.earlierPlan, cmp.result.earlierPlanTotalTime);
+    line("Later stop  ", later, cmp.laterPlan, cmp.result.laterPlanTotalTime);
+    if (isReachable(cmp.result.timeDeltaSeconds)) {
+        const double d = cmp.result.timeDeltaSeconds;
+        out << "\n" << (d > 0.0 ? "The earlier stop (undercut) is faster by "
+                               : (d < 0.0 ? "The later stop (overcut) is faster by "
+                                          : "The two are level: "))
+            << std::fabs(d) << " s\n";
+    } else {
+        out << "\nNo comparison: at least one of the two plans cannot be run.\n";
     }
     out << "\n";
     return kStrategyOk;
@@ -498,6 +540,9 @@ void printStrategyHelp(std::ostream& out) {
            "      The best plan for each exact stop count 0..N (default 4).\n"
            "  traffic [--min-gap SECONDS] [--pass-margin SECONDS]\n"
            "      Run the comparison set clean, then with the overtaking rule on.\n"
+           "  undercut --earlier-lap L --later-lap M\n"
+           "      Stop after lap L or lap M (opening compound of the optimum, best\n"
+           "      continuation after): which is faster, in a simplified clean-air model.\n"
            "  help\n"
            "      This message.\n";
 }
@@ -517,6 +562,7 @@ int runStrategyCommand(const std::vector<std::string>& args, const PitStrategy& 
         if (command == "sensitivity") return runSensitivity(args, strategy, out);
         if (command == "stops") return runStops(args, strategy, out);
         if (command == "traffic") return runTraffic(args, strategy, out);
+        if (command == "undercut") return runUndercut(args, strategy, out);
         throw UsageError("unknown strategy command '" + command + "'; try 'strategy help'");
     } catch (const std::exception& error) {
         err << "boxbox: strategy: " << error.what() << "\n";

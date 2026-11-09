@@ -39,6 +39,21 @@ Edits to shared files, all additive:
   byte for byte apart from the help text, and with `--race-laps` the only
   difference is the added report.
 
+## Added 2026-11-10 (plan sec. 4.2A and 4.2D)
+
+* `DegradationProfile::cumulativeDegradation()`: seconds lost against a fresh tire over the
+  first a + 1 laps of a stint (the running sum of `degradationVsFresh`; checked against
+  `stintCost[a + 1] - (a + 1) × fresh lap`, an independent route to the same number).
+* `cliffStepSeconds()`: the jump in lap time at the age the cliff first bites (normal wear plus
+  one lap of cliff rate). `lapTimeChangeAfterCliff()`: the change from the last lap before the
+  cliff to the last legal lap. Both are empty exactly when `cliffActivationAge()` is.
+* `tires profile` prints the cumulative column and both cliff figures.
+* `tires threshold --compound NAME --max-degradation S --max-average S` (both given) lists every
+  legal stint length that meets both limits, by scanning all lengths: `stintLengthsWithin` now
+  has a CLI.
+* The Fenwick tree is also tested at scale (60,000 slots, 30,000 interleaved updates and range
+  queries against a plain array, plus the linear build against 60,000 separate adds).
+
 ## Sources of truth
 
 Nothing in this module re-implements the race model.
@@ -284,7 +299,7 @@ so would reporting only the first crossover: `compareCompounds` gives
 ## Tests
 
 `make test` runs this module's checks as part of the single total the harness
-prints (254,839 checks across all modules on 2026-11-10; the harness does not
+prints (262,435 checks across all modules on 2026-11-10; the harness does not
 print a per-module split, so earlier per-module figures are not repeated).
 They cover:
 
@@ -424,7 +439,7 @@ the benchmark exception to NFR-5 himself.
 
 * **Windows: validated 2026-11-10** with `mingw32-make` and g++ 15.2.0
   (MinGW-W64 x86_64-ucrt-posix-seh, target `x86_64-w64-mingw32`): a clean
-  `mingw32-make` with zero warnings, `mingw32-make test` (254,839 checks, 0
+  `mingw32-make` with zero warnings, `mingw32-make test` (262,435 checks, 0
   failed) and `mingw32-make bench` (all correctness checks passed). This is a
   Windows MinGW-W64 toolchain, not an MSYS2 UCRT64 shell; nobody has run it
   under MSYS2 itself.
