@@ -30,6 +30,8 @@
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 
+#include "TireModuleTests.hpp"
+
 namespace {
 
 using boxbox::Driver;
@@ -1428,6 +1430,10 @@ int main() {
     testOvertakeRuleSettings();
     testOvertakingHandCases();
     testOvertakingProperties();
+
+    const TireTestTally tires = runTireModuleTests();
+    g_checks += tires.checks;
+    g_failures += tires.failures;
 
     std::cout << "\n---------------------\n";
     std::cout << g_checks << " checks, " << g_failures << " failed\n";
