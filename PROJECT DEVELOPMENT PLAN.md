@@ -910,33 +910,44 @@ and a real use case are present.
   Brute-force enumeration Existing tests          Independent correctness
                                                   reference
 
-  Hash Maps               Planned /               Driver and event
-                          standard-library use to aggregation
-                          be formalized           
+  Hash Maps               Implemented             Driver and event
+                          (std::unordered_map)    aggregation
 
-  Segment Tree            Planned                 Dynamic range analytics
+  Segment Tree            Implemented              Dynamic range analytics
 
-  Fenwick Tree            Planned                 Cumulative lap and
+  Fenwick Tree            Implemented              Cumulative lap and
                                                   traffic statistics
 
-  Monotonic Deque         Planned                 Sliding-window lap
+  Monotonic Deque         Implemented              Sliding-window lap
                                                   analytics
 
-  Custom Event Priority   Planned                 Deterministic event
+  Custom Event Priority   Implemented              Deterministic event
   Queue                                           scheduling
 
-  Binary Search           Planned                 Monotonic threshold
+  Binary Search           Implemented              Monotonic threshold
                                                   queries
 
   Interval Processing     Planned                 Stint and pit-window
                                                   analysis
 
-  Bounded k-best DAG      Planned                 Alternative strategy
+  Bounded k-best DAG      Implemented              Alternative strategy
   exploration                                     exploration
 
   Greedy analysis         Planned                 Explicitly defined
                                                   pit-window scenarios
   -----------------------------------------------------------------------
+
+**Status note (repo audit):** the structures marked Implemented have
+headers and sources in `include/boxbox/` and `src/`. Interval Processing
+and Greedy analysis were not confirmed in the code and remain Planned.
+Deviations from this plan: headers are flat in `include/boxbox/` (no
+`analytics/`, `data_structures/`, `events/` subfolders); driver, pit and
+event reports are CLI flags (`--driver-stats`, `--top-laps`,
+`--lap-window`, `--pit-report`, `--events`) rather than `drivers`, `pit`
+and `events` command groups; there is no `benchmark` CLI command, only
+`make bench`; tests are split as `test_tire_module.cpp` and
+`test_driver_analytics.cpp` instead of `test_data_structures.cpp` and
+`test_analytics.cpp`.
 
 ### Implementation policy
 
