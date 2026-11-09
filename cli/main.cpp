@@ -19,6 +19,10 @@
 #include <vector>
 
 #include "boxbox/Common.hpp"
+#include "boxbox/EventLog.hpp"
+#include "boxbox/EventPriorityQueue.hpp"
+#include "boxbox/PitAnalytics.hpp"
+#include "boxbox/RaceEvent.hpp"
 #include "boxbox/Driver.hpp"
 #include "boxbox/PitStrategy.hpp"
 #include "boxbox/RaceSimulator.hpp"
@@ -28,6 +32,11 @@
 namespace {
 
 using boxbox::Driver;
+using boxbox::EventLog;
+using boxbox::EventPriorityQueue;
+using boxbox::PitAnalytics;
+using boxbox::RaceEvent;
+using boxbox::RaceEventType;
 using boxbox::OvertakeRule;
 using boxbox::PitStrategy;
 using boxbox::RaceSimulator;
@@ -178,6 +187,112 @@ std::string formatDelta(double value) {
     return out.str();
 }
 
+const char* eventTypeName(RaceEventType type) noexcept {
+    switch (type) {
+        case RaceEventType::PitEntry: return "PitEntry";
+        case RaceEventType::CompoundChange: return "CompoundChange";
+        case RaceEventType::PitExit: return "PitExit";
+        case RaceEventType::LapCompleted: return "LapCompleted";
+        case RaceEventType::Overtake: return "Overtake";
+        case RaceEventType::TrafficHold: return "TrafficHold";
+        case RaceEventType::RaceFinish: return "RaceFinish";
+    }
+    return "Unknown";
+}
+
+void printEventLog(const EventLog& eventLog,
+                   const std::vector<TireCompound>& compounds) {
+    std::cout << "\n=== Event Log (" << eventLog.size() << " events) ===\n";
+    if (eventLog.empty()) {
+        std::cout << "  No events recorded.\n\n";
+        return;
+    }
+
+    for (const RaceEvent& event : eventLog.entries()) {
+        std::cout << "  " << formatClock(event.timestamp)
+                  << "  lap " << std::setw(3) << event.lap
+                  << "  driver " << std::setw(3) << event.driverNumber
+                  << "  " << eventTypeName(event.type);
+
+        if (event.type == RaceEventType::CompoundChange) {
+            const int oldIndex = event.oldCompoundIndex;
+            const int newIndex = event.newCompoundIndex;
+            std::cout << "  ";
+            if (oldIndex >= 0 && static_cast<std::size_t>(oldIndex) < compounds.size()) {
+                std::cout << compounds[static_cast<std::size_t>(oldIndex)].name();
+            } else {
+                std::cout << "index " << oldIndex;
+            }
+            std::cout << " -> ";
+            if (newIndex >= 0 && static_cast<std::size_t>(newIndex) < compounds.size()) {
+                std::cout << compounds[static_cast<std::size_t>(newIndex)].name();
+            } else {
+                std::cout << "index " << newIndex;
+            }
+        } else if (event.type == RaceEventType::Overtake) {
+            std::cout << "  passed driver " << event.otherDriverNumber;
+        } else if (event.type == RaceEventType::TrafficHold) {
+            std::cout << "  behind driver " << event.otherDriverNumber
+                      << "  loss " << formatSeconds(event.holdLossSeconds) << " s";
+        }
+        std::cout << '\n';
+    }
+    std::cout << '\n';
+}
+
+void printPitReport(const EventLog& eventLog, double pitLoss,
+                    const std::vector<TireCompound>& compounds) {
+    std::cout << "\n=== Pit Report ===\n";
+    PitAnalytics analytics(eventLog);
+    const std::vector<boxbox::DriverPitSummary> summaries = analytics.allSummaries();
+
+    if (summaries.empty()) {
+        std::cout << "  No driver pit data recorded.\n\n";
+    } else {
+        for (const boxbox::DriverPitSummary& summary : summaries) {
+            std::cout << "  Driver " << summary.driverNumber
+                      << "  stops: " << summary.stopCount
+                      << "  pit loss: "
+                      << formatSeconds(analytics.totalPitLoss(summary.driverNumber, pitLoss))
+                      << " s\n";
+
+            for (std::size_t i = 0; i < summary.stintLengthsLaps.size(); ++i) {
+                std::cout << "    Stint " << (i + 1U) << ": ";
+                if (i < summary.compoundIndicesUsed.size()) {
+                    const int compoundIndex = summary.compoundIndicesUsed[i];
+                    if (compoundIndex >= 0 &&
+                        static_cast<std::size_t>(compoundIndex) < compounds.size()) {
+                        std::cout << compounds[static_cast<std::size_t>(compoundIndex)].name();
+                    } else {
+                        std::cout << "compound index " << compoundIndex;
+                    }
+                } else {
+                    std::cout << "unknown compound";
+                }
+                std::cout << ", " << summary.stintLengthsLaps[i] << " laps\n";
+            }
+
+            if (!summary.stopLaps.empty()) {
+                std::cout << "    Stop at end of lap(s): ";
+                for (std::size_t i = 0; i < summary.stopLaps.size(); ++i) {
+                    if (i > 0U) std::cout << ", ";
+                    std::cout << summary.stopLaps[i];
+                }
+                std::cout << '\n';
+            }
+        }
+    }
+
+    const PitAnalytics::PitWindow window = analytics.pitWindow();
+    if (window.hasStops) {
+        std::cout << "  Overall pit window: laps " << window.earliestStopLap
+                  << " - " << window.latestStopLap << '\n';
+    } else {
+        std::cout << "  Overall pit window: no pit stops recorded\n";
+    }
+    std::cout << '\n';
+}
+
 void printUsage(std::ostream& out) {
     const OvertakeRule defaults;  // FR-9 defaults come from the core, not from here
     out <<
@@ -223,6 +338,10 @@ void printUsage(std::ostream& out) {
         "\n"
         "Output:\n"
         "  --show-table            Print the per-compound stint-cost table.\n"
+        "  --events                Print the chronological race event log. Implies\n"
+        "                          --simulate.\n"
+        "  --pit-report            Print per-driver pit-stop and stint analytics.\n"
+        "                          Implies --simulate.\n"
         "  -h, --help              This message.\n"
         "\n"
         "Exit status:\n"
@@ -232,6 +351,7 @@ void printUsage(std::ostream& out) {
         "  boxbox --laps 50 --pit-loss 22.0\n"
         "  boxbox --laps 50 --rivals --lap-log 10\n"
         "  boxbox --laps 50 --rivals --overtake --lap-log 10\n"
+        "  boxbox --laps 50 --events --pit-report\n"
         "  boxbox --laps 4 --pit-loss 5 --sector 10 \\\n"
         "           --compound A:0:1:3 --compound B:2:0:4 --show-table\n";
 }
@@ -445,6 +565,8 @@ struct Options {
     bool sectorsOverridden = false;
     bool compoundsOverridden = false;
     bool showTable = false;
+    bool showEvents = false;
+    bool showPitReport = false;
     bool simulate = false;
     bool rivals = false;
     int lapLog = 0;
@@ -506,6 +628,12 @@ Options parseArguments(int argc, char** argv) {
             options.compounds.push_back(parseCompound(spec));
         } else if (arg == "--show-table") {
             options.showTable = true;
+        } else if (arg == "--events") {
+            options.showEvents = true;
+            options.simulate = true;
+        } else if (arg == "--pit-report") {
+            options.showPitReport = true;
+            options.simulate = true;
         } else if (arg == "--simulate") {
             options.simulate = true;
         } else if (arg == "--rivals") {
@@ -578,6 +706,14 @@ int main(int argc, char** argv) {
         RaceSimulator simulator(strategy.track(), strategy.compounds());
         simulator.setOvertakeRule(options.overtake);
 
+        // The queue is the simulator's optional event sink. It is drained into
+        // EventLog after the replay, preserving the queue's canonical order.
+        EventPriorityQueue eventQueue;
+        EventLog eventLog;
+        if (options.showEvents || options.showPitReport) {
+            simulator.setEventSink(&eventQueue);
+        }
+
         std::cout << "============================================================\n"
                   << " BOX BOX - F1 Pit-Stop & Race Strategy Scheduler\n"
                   << "============================================================\n\n";
@@ -629,6 +765,19 @@ int main(int argc, char** argv) {
             } else {
                 simulator.runToFinish();
                 printStandings(simulator, "Final classification");
+            }
+
+            if (options.showEvents || options.showPitReport) {
+                while (!eventQueue.empty()) {
+                    eventLog.record(eventQueue.pop());
+                }
+            }
+
+            if (options.showEvents) {
+                printEventLog(eventLog, strategy.compounds());
+            }
+            if (options.showPitReport) {
+                printPitReport(eventLog, strategy.track().pitLoss(), strategy.compounds());
             }
 
             // FR-8 is defined on a single-driver, no-overtake race. Replay the
