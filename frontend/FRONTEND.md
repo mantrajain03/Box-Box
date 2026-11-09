@@ -350,6 +350,22 @@ K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
 - The page controls and segmented controls now scroll inside their own box on narrow screens, which fixed a
   horizontal overflow at 400 px.
 
+**Phase I (Battle) is built; every page in the rail now exists.**
+- `battle.plans` is the catalogue, ranked by total time with the optimum first: the core's standard candidates
+  (`standardCandidates`: the optimum, single-compound plans, the best plan per stop count, the best single-compound-only
+  plans), then the best 40 grid plans per stop count (stints in multiples of 5 laps, the last stint takes the remainder,
+  1 to 4 stints, every compound assignment). Each is costed by `evaluateAgainst`, so it uses the optimizer's own code path.
+- Each plan carries `deltaByPitLoss`: its total minus the best total at that pit loss, each from a separately built
+  `PitStrategy`. The page subtracts nothing itself. The optimum plan is the best one at this race's pit loss only, so it
+  is not flat at zero in the robustness chart.
+- `headToHead` is a two-car race against the optimum with the overtaking rule on (`cleanAirVsTraffic`): the plan's clean time
+  (which equals its own total, FR-8), its time with traffic, the loss and the finishing place in each.
+- Not built from section 4.7: "stint efficiency" (the core has no such measure and none was invented) and a free-form
+  plan builder. The catalogue is the enumeration, filterable by stop count and compound; a plan outside it (for example
+  stints that are not multiples of 5 laps) is evaluated by `boxbox strategy evaluate --plan ...`.
+- The enumeration stops after 2,000,000 plans (only reachable with a very large compound set) and the catalogue is
+  exported for races of 2 to 100 laps.
+
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.
 - Commit `frontend/data/` or gitignore it (generated).

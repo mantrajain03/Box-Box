@@ -1055,6 +1055,202 @@ bool writeDriverAnalytics(JsonWriter& json, const PitStrategy& strategy, const L
 }
 
 // ---------------------------------------------------------------------------
+// Battle: a catalogue of plans, each evaluated by the core
+// ---------------------------------------------------------------------------
+
+/// Stint lengths in the enumerated plans are multiples of this many laps (the last stint takes
+/// the remainder), so an N-lap race has at most a few thousand plans per stop count.
+constexpr int kBattleGridStep = 5;
+
+/// How many of the best grid plans are kept for each stop count.
+constexpr std::size_t kBattlePerStop = 40;
+
+/// Stops the enumeration of grid plans abandons when it has evaluated this many plans.
+constexpr long long kBattleMaxLeaves = 2000000;
+
+/// A result's stints as the (compound, laps) plan form the evaluators take.
+std::vector<PlannedStint> planOfResult(const StrategyResult& result) {
+    std::vector<PlannedStint> plan;
+    for (const Stint& stint : result.stints) {
+        plan.push_back(PlannedStint{stint.compoundIndex, stint.laps});
+    }
+    return plan;
+}
+
+struct CatalogPlan {
+    std::string name;
+    std::string source;  ///< "named" (the core's standard candidates) or "grid"
+    std::vector<PlannedStint> plan;
+};
+
+/// Enumerates every plan of exactly `stints` stints whose first stints are multiples of the grid
+/// step, with every assignment of compounds, and keeps the feasible ones with their totals.
+void enumerateGrid(const PitStrategy& strategy, std::size_t stints, int lapsLeft, std::vector<PlannedStint>& current,
+                   long long& leaves, std::vector<std::pair<double, std::vector<PlannedStint>>>& out) {
+    const std::size_t compoundCount = strategy.compounds().size();
+    if (leaves >= kBattleMaxLeaves) {
+        return;
+    }
+    if (current.size() + 1U == stints) {
+        for (std::size_t c = 0; c < compoundCount; ++c) {
+            current.push_back(PlannedStint{c, lapsLeft});
+            ++leaves;
+            const StrategyResult result = strategy.evaluatePlan(current);
+            if (result.feasible) {
+                out.emplace_back(result.totalTime, current);
+            }
+            current.pop_back();
+        }
+        return;
+    }
+    // Leave at least one lap for each stint still to come.
+    const int stintsAfter = static_cast<int>(stints - current.size() - 1U);
+    for (int length = kBattleGridStep; length + stintsAfter <= lapsLeft; length += kBattleGridStep) {
+        for (std::size_t c = 0; c < compoundCount; ++c) {
+            if (length > strategy.compounds()[c].maxStintLaps()) {
+                continue;  // a stint longer than the compound allows is not a plan
+            }
+            current.push_back(PlannedStint{c, length});
+            enumerateGrid(strategy, stints, lapsLeft - length, current, leaves, out);
+            current.pop_back();
+        }
+    }
+}
+
+/// The plans the Battle page lets you compare: the core's standard candidates (the optimum,
+/// every single-compound plan, the best plan per stop count, the best single-compound-only
+/// plans), then the best `kBattlePerStop` grid plans for each stop count. Ranked by total time.
+std::vector<CatalogPlan> battleCatalogue(const PitStrategy& strategy, int maxStops) {
+    std::vector<CatalogPlan> catalogue;
+    const auto add = [&](const std::string& name, const std::string& source, const std::vector<PlannedStint>& plan) {
+        for (const CatalogPlan& existing : catalogue) {
+            if (samePlan(existing.plan, plan)) { return; }
+        }
+        if (strategy.evaluatePlan(plan).feasible) {
+            catalogue.push_back(CatalogPlan{name, source, plan});
+        }
+    };
+
+    for (const NamedPlan& named : standardCandidates(strategy, maxStops)) {
+        add(named.name, "named", named.plan);
+    }
+
+    const int laps = strategy.track().totalLaps();
+    long long leaves = 0;
+    for (int stops = 0; stops <= maxStops && stops < laps; ++stops) {
+        std::vector<std::pair<double, std::vector<PlannedStint>>> found;
+        std::vector<PlannedStint> current;
+        enumerateGrid(strategy, static_cast<std::size_t>(stops) + 1U, laps, current, leaves, found);
+        std::stable_sort(found.begin(), found.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::size_t rank = 0;
+        for (const auto& entry : found) {
+            if (rank >= kBattlePerStop) { break; }
+            const std::size_t before = catalogue.size();
+            add(std::to_string(stops) + "-stop #" + std::to_string(rank + 1U), "grid", entry.second);
+            rank += (catalogue.size() > before) ? 1U : 0U;
+        }
+    }
+
+    // Rank by total time; the optimum is first (its delta is 0), ties keep enumeration order.
+    std::vector<double> totals;
+    for (const CatalogPlan& p : catalogue) { totals.push_back(strategy.evaluatePlan(p.plan).totalTime); }
+    std::vector<std::size_t> order(catalogue.size());
+    for (std::size_t i = 0; i < order.size(); ++i) { order[i] = i; }
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return totals[a] < totals[b]; });
+    std::vector<CatalogPlan> ranked;
+    for (const std::size_t i : order) { ranked.push_back(catalogue[i]); }
+    return ranked;
+}
+
+/// The `battle` section. Every number is the core's: evaluateAgainst for the plan's report, an
+/// optimizer built at each pit loss for the robustness series, and cleanAirVsTraffic for a
+/// two-car race against the optimum with the overtaking rule on and off.
+void writeBattle(JsonWriter& json, const PitStrategy& strategy, int maxStops, const std::vector<double>& pitLosses,
+                 const OvertakeRule& overtake) {
+    const double optimumTotal = strategy.optimize().totalTime;
+    const std::vector<CatalogPlan> catalogue = battleCatalogue(strategy, maxStops);
+
+    // One optimizer per pit loss, kept so each plan is evaluated under the same model.
+    std::vector<PitStrategy> atLoss;
+    std::vector<double> optimalAtLoss;
+    for (const double loss : pitLosses) {
+        Track track = strategy.track();
+        track.setPitLoss(loss);
+        atLoss.emplace_back(track, strategy.compounds());
+        optimalAtLoss.push_back(atLoss.back().optimize().totalTime);
+    }
+
+    json.beginObject();
+    json.key("gridStep").integer(kBattleGridStep);
+    json.key("perStop").integer(static_cast<long long>(kBattlePerStop));
+    json.key("pitLosses");
+    writeNumbers(json, pitLosses);
+    json.key("optimalByPitLoss");
+    writeNumbers(json, optimalAtLoss);
+
+    json.key("plans").beginArray();
+    const NamedPlan optimalPlan{"optimal", planOfResult(strategy.optimize())};
+    for (std::size_t i = 0; i < catalogue.size(); ++i) {
+        const CatalogPlan& entry = catalogue[i];
+        const StrategyReport report = evaluateAgainst(strategy, entry.name, entry.plan, optimumTotal);
+
+        json.beginObject();
+        json.key("id").integer(static_cast<long long>(i));
+        json.key("name").string(entry.name);
+        json.key("source").string(entry.source);
+        json.key("stops").integer(report.stops);
+        json.key("stints").beginArray();
+        for (const StintReport& stint : report.stints) {
+            json.beginObject()
+                .key("compound").integer(static_cast<long long>(stint.compoundIndex))
+                .key("firstLap").integer(stint.firstLap).key("lastLap").integer(stint.lastLap)
+                .key("laps").integer(stint.laps).key("time").number(stint.time).key("share").number(stint.share)
+                .endObject();
+        }
+        json.endArray();
+        json.key("compoundUsage").beginArray();
+        for (const CompoundLaps& usage : report.compoundUsage) {
+            json.beginObject().key("compound").integer(static_cast<long long>(usage.compoundIndex))
+                .key("laps").integer(usage.laps).endObject();
+        }
+        json.endArray();
+        json.key("greenTime").number(report.greenTime);
+        json.key("pitTime").number(report.pitTime);
+        json.key("totalTime").number(report.totalTime);
+        json.key("deltaVsOptimum").number(report.deltaVsOptimum);
+        json.key("percentVsOptimum").number(report.percentVsOptimum);
+
+        // How much worse than the optimum this plan is at each pit loss.
+        json.key("deltaByPitLoss").beginArray();
+        for (std::size_t k = 0; k < atLoss.size(); ++k) {
+            json.number(atLoss[k].evaluatePlan(entry.plan).totalTime - optimalAtLoss[k]);
+        }
+        json.endArray();
+
+        // A two-car race against the optimum, with the overtaking rule on: what traffic costs this plan.
+        json.key("headToHead");
+        if (samePlan(entry.plan, optimalPlan.plan)) {
+            json.null();
+        } else {
+            OvertakeRule rule = overtake;
+            rule.enabled = true;
+            const std::vector<TrafficComparisonRow> rows =
+                cleanAirVsTraffic(strategy, {optimalPlan, NamedPlan{entry.name, entry.plan}}, rule);
+            const TrafficComparisonRow& row = rows[1];
+            json.beginObject()
+                .key("cleanTime").number(row.cleanTime).key("trafficTime").number(row.trafficTime)
+                .key("trafficLoss").number(row.trafficLoss)
+                .key("cleanPosition").integer(row.cleanPosition).key("trafficPosition").integer(row.trafficPosition)
+                .endObject();
+        }
+        json.endObject();
+    }
+    json.endArray();
+    json.endObject();
+}
+
+// ---------------------------------------------------------------------------
 // Algorithms: the catalog, and operation counts (counted, never timed)
 // ---------------------------------------------------------------------------
 
@@ -1786,6 +1982,14 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
         json.null();
     } else {
         writeStructures(json, static_cast<std::size_t>(track.totalLaps()));
+    }
+
+    // Plans to compare against the optimum (needs a race of 2 to 100 laps).
+    json.key("battle");
+    if (track.totalLaps() < 2 || track.totalLaps() > kMaxRangeLaps) {
+        json.null();
+    } else {
+        writeBattle(json, strategy, maxStops, scenarioLosses, settings.overtake);
     }
 
     json.key("algorithms");

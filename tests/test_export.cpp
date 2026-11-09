@@ -1177,6 +1177,145 @@ void testBundlePit() {
     }
 }
 
+void testBundleBattle() {
+    beginSection("Export bundle: plan catalogue, robustness across pit losses, head-to-head");
+
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
+    const Track track = makeTrack(50, 22.0, {28.4, 31.2, 30.4});
+    const PitStrategy strategy(track, compounds);
+    const double optimum = strategy.optimize().totalTime;
+    std::string failure;
+    const std::string text = bundleFor(strategy, failure);
+    XCHECK_MSG(failure.empty(), failure);
+    Json root;
+    if (!parseJson(text, root)) {
+        XCHECK_MSG(false, "bundle is not valid JSON");
+        return;
+    }
+
+    try {
+        const Json& battle = root.at("battle");
+        const Json& plans = battle.at("plans");
+        const Json& losses = battle.at("pitLosses");
+        XCHECK(plans.size() > 20U);
+        XCHECK(losses.size() == 21U);
+        XCHECK(static_cast<int>(battle.at("gridStep").number + 0.5) == 5);
+
+        // Independent optimizers, one per pit loss.
+        std::vector<PitStrategy> atLoss;
+        std::vector<double> bestAtLoss;
+        std::size_t baseIndex = losses.size();
+        for (std::size_t k = 0; k < losses.size(); ++k) {
+            Track t = track;
+            t.setPitLoss(losses.at(k).number);
+            atLoss.emplace_back(t, compounds);
+            bestAtLoss.push_back(atLoss.back().optimize().totalTime);
+            XCHECK_NEAR(battle.at("optimalByPitLoss").at(k).number, bestAtLoss.back(), 1.0e-7);
+            if (std::fabs(losses.at(k).number - 22.0) < 1.0e-9) { baseIndex = k; }
+        }
+        XCHECK(baseIndex < losses.size());
+
+        // The ranking starts with the optimum and never goes down.
+        XCHECK(plans.at(0).at("name").text == "optimal");
+        XCHECK_NEAR(plans.at(0).at("deltaVsOptimum").number, 0.0, boxbox::kClosureTolerance);
+        XCHECK(plans.at(0).at("headToHead").kind == Json::Kind::Null);
+
+        std::vector<std::vector<std::pair<int, int>>> seen;
+        std::size_t gridPerStops[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        for (std::size_t i = 0; i < plans.size(); ++i) {
+            const Json& p = plans.at(i);
+            if (i > 0U) { XCHECK(p.at("totalTime").number >= plans.at(i - 1U).at("totalTime").number); }
+
+            // The plan as stints, re-evaluated by the core.
+            std::vector<boxbox::PlannedStint> plan;
+            std::vector<std::pair<int, int>> signature;
+            int laps = 0;
+            for (std::size_t s = 0; s < p.at("stints").size(); ++s) {
+                const std::size_t c = static_cast<std::size_t>(p.at("stints").at(s).at("compound").number + 0.5);
+                const int l = static_cast<int>(p.at("stints").at(s).at("laps").number + 0.5);
+                plan.push_back(boxbox::PlannedStint{c, l});
+                signature.push_back({static_cast<int>(c), l});
+                laps += l;
+            }
+            XCHECK(laps == 50);
+            XCHECK(static_cast<int>(p.at("stops").number + 0.5) == static_cast<int>(plan.size()) - 1);
+            const boxbox::StrategyResult expected = strategy.evaluatePlan(plan);
+            XCHECK(expected.feasible);
+            XCHECK_NEAR(p.at("totalTime").number, expected.totalTime, 1.0e-7);
+            XCHECK_NEAR(p.at("greenTime").number + p.at("pitTime").number, p.at("totalTime").number, 1.0e-7);
+            XCHECK_NEAR(p.at("pitTime").number, 22.0 * static_cast<double>(plan.size() - 1U), 1.0e-9);
+            XCHECK_NEAR(p.at("deltaVsOptimum").number, expected.totalTime - optimum, 1.0e-7);
+
+            int used = 0;
+            for (std::size_t u = 0; u < p.at("compoundUsage").size(); ++u) { used += static_cast<int>(p.at("compoundUsage").at(u).at("laps").number + 0.5); }
+            XCHECK(used == 50);
+
+            // No duplicates.
+            for (const auto& other : seen) { XCHECK_MSG(other != signature, "the catalogue must not repeat a plan"); }
+            seen.push_back(signature);
+
+            // Grid plans: stints before the last are multiples of the step, and each stop count is capped.
+            if (p.at("source").text == "grid") {
+                for (std::size_t s = 0; s + 1U < plan.size(); ++s) { XCHECK(plan[s].laps % 5 == 0); }
+                const std::size_t stops = plan.size() - 1U;
+                if (stops < 8U) { ++gridPerStops[stops]; }
+            }
+
+            // Robustness: against the best plan at each pit loss, from independent optimizers.
+            XCHECK(p.at("deltaByPitLoss").size() == losses.size());
+            for (std::size_t k = 0; k < losses.size(); ++k) {
+                const double expectedDelta = atLoss[k].evaluatePlan(plan).totalTime - bestAtLoss[k];
+                XCHECK_NEAR(p.at("deltaByPitLoss").at(k).number, expectedDelta, 1.0e-7);
+                XCHECK(p.at("deltaByPitLoss").at(k).number >= -boxbox::kClosureTolerance);
+            }
+            XCHECK_NEAR(p.at("deltaByPitLoss").at(baseIndex).number, p.at("deltaVsOptimum").number, 1.0e-7);
+
+            // Head to head with the optimum: with the rule off the plan runs its own time (FR-8).
+            if (i > 0U) {
+                const Json& h = p.at("headToHead");
+                XCHECK(h.kind == Json::Kind::Object);
+                if (h.kind == Json::Kind::Object) {
+                    XCHECK_NEAR(h.at("cleanTime").number, p.at("totalTime").number, boxbox::kClosureTolerance);
+                    XCHECK(h.at("trafficLoss").number >= 0.0);
+                    XCHECK(h.at("trafficTime").number >= h.at("cleanTime").number - boxbox::kClosureTolerance);
+                }
+            }
+        }
+        for (std::size_t stops = 0; stops < 8U; ++stops) { XCHECK_MSG(gridPerStops[stops] <= 40U, "at most 40 grid plans per stop count"); }
+        XCHECK_MSG(gridPerStops[1] > 0U && gridPerStops[2] > 0U && gridPerStops[3] > 0U, "grid plans for 1, 2 and 3 stops");
+    } catch (const std::exception& error) {
+        XCHECK_MSG(false, std::string("bundle is missing a field: ") + error.what());
+    }
+
+    // Too short or too long: no catalogue, and nothing else breaks. A tiny race still works.
+    for (const int laps : {1, 101}) {
+        const PitStrategy other(makeTrack(laps, 22.0, {28.4, 31.2, 30.4}), compounds);
+        std::string otherFailure;
+        const std::string otherText = bundleFor(other, otherFailure);
+        Json otherRoot;
+        XCHECK_MSG(otherFailure.empty(), otherFailure);
+        XCHECK(parseJson(otherText, otherRoot));
+        if (otherRoot.kind == Json::Kind::Object) { XCHECK(otherRoot.at("battle").kind == Json::Kind::Null); }
+    }
+    {
+        std::vector<TireCompound> hand;
+        hand.emplace_back("A", 0.0, 1.0, 3);
+        hand.emplace_back("B", 2.0, 0.0, 4);
+        const PitStrategy small(makeTrack(4, 5.0, {10.0}), hand);
+        std::string smallFailure;
+        const std::string smallText = bundleFor(small, smallFailure);
+        Json smallRoot;
+        XCHECK_MSG(smallFailure.empty(), smallFailure);
+        XCHECK(parseJson(smallText, smallRoot));
+        if (smallRoot.kind == Json::Kind::Object) {
+            const Json& plans = smallRoot.at("battle").at("plans");
+            XCHECK(plans.size() >= 1U);
+            XCHECK(plans.at(0).at("name").text == "optimal");
+            XCHECK_NEAR(plans.at(0).at("totalTime").number, 47.0, boxbox::kTimeEpsilon);   // the PRD's hand-worked case
+        }
+    }
+}
+
 void testBundleAlgorithms() {
     beginSection("Export bundle: algorithm catalog and operation counts");
 
@@ -1747,6 +1886,7 @@ ExportTestTally runExportTests() {
     testBundleTires();
     testBundleDriverAnalytics();
     testBundlePit();
+    testBundleBattle();
     testBundleAlgorithms();
     testBundleRaceRuns();
     testTrackOutline();
