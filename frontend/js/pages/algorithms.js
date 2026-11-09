@@ -22,10 +22,11 @@
       dp: { lap: Math.min(18, N) },
       lb: { k: 0 },
       prefix: { c: 0, len: 10 },
-      segtree: { from: 11, to: Math.min(20, N) },
-      fenwick: { from: 11, to: Math.min(20, N) },
+      // Defaults are clamped to the race, which can be as short as one lap.
+      segtree: { from: Math.min(11, N), to: Math.min(20, N) },
+      fenwick: { from: Math.min(11, N), to: Math.min(20, N) },
       deque: { size: 5, lap: Math.min(26, N) },
-      bsearch: { c: 0, limit: 4 },
+      bsearch: { c: 0, limit: Math.min(4, data.tires.limits.length - 1) },
       topk: { k: 5, order: 'fastest' },
       greedy: { slack: 5 },
       hashmap: { car: 1 }

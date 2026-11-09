@@ -70,7 +70,9 @@
       ui.setBody(root, 'dr-pick',
         '<div class="legend togs" style="margin:0">' + r.drivers.map(function (d) {
           const on = sel.indexOf(d.car) >= 0;
-          return '<button type="button" class="tog' + (on ? ' on' : '') + '" data-pick="' + d.car + '" aria-pressed="' + on + '">' +
+          const last = on && sel.length === 1;   // one car always stays selected
+          return '<button type="button" class="tog' + (on ? ' on' : '') + '" data-pick="' + d.car + '" aria-pressed="' + on + '"' +
+            (last ? ' disabled title="At least one car stays selected: pick another to swap"' : '') + '>' +
             '<i class="swatch" style="background:' + model.carColor(d.car) + '"></i>#' + d.car + ' ' + esc(d.name) + '</button>';
         }).join('') + '<span class="muted">Pick up to ' + MAX_PICKED + ' cars to compare. A fourth replaces the oldest.</span></div>');
     }
@@ -169,7 +171,7 @@
         '<table class="table"><thead><tr><th>#</th><th>Car</th><th class="num">Value</th></tr></thead><tbody>' +
         order.map(function (car, i) {
           const d = driver(car);
-          return '<tr class="pick' + (sel.indexOf(car) >= 0 ? ' sel' : '') + '" data-rankcar="' + car + '" tabindex="0" title="Click to add or remove this car">' +
+          return '<tr class="pick' + (sel.indexOf(car) >= 0 ? ' sel' : '') + '" data-rankcar="' + car + '" tabindex="0"' + (sel.length === 1 && sel[0] === car ? ' aria-disabled="true" title="At least one car stays selected: pick another to swap"' : ' title="Click to add or remove this car"') + '>' +
             '<td class="num">' + (i + 1) + '</td><td><span class="swatch" style="background:' + model.carColor(car) + '"></span><span class="carno">' + car + '</span> ' + esc(d.name) +
             '</td><td class="num">' + metricValue(d) + '</td></tr>';
         }).join('') + '</tbody></table><p class="muted" style="margin-top:8px;font-size:12px">' + info[metric] + ' Equal values go to the lower car number.</p>');

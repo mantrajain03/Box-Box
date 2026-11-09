@@ -192,6 +192,7 @@ input[type="range"] { accent-color: var(--red); height: 4px; cursor: pointer; }
 .tog:hover { color: var(--text); border-color: #34344a; }
 .tog.on { color: var(--text); background: var(--panel-2); border-color: #34344a; }
 .tog:not(.on) .swatch { opacity: .35; }
+.tog:disabled { cursor: not-allowed; opacity: .8; }
 
 .bs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); gap: 5px; margin-top: 12px; }
 .bs-cell {
