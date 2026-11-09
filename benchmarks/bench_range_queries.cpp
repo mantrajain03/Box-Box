@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "bench_strategy.hpp"
 #include "boxbox/Common.hpp"
 #include "boxbox/FenwickTree.hpp"
 #include "boxbox/RaceLapAnalytics.hpp"
@@ -440,6 +441,7 @@ int main() {
     ok = benchSwaps("a real field (20 cars)", 20) && ok;
     ok = benchSwaps("1,000 cars", 1000) && ok;
     ok = benchSwaps("20,000 cars", 20000) && ok;
+    ok = runStrategyBenchmarks() && ok;
     std::cout << (ok ? "All correctness checks passed.\n" : "CORRECTNESS FAILURE\n");
     return ok ? 0 : 1;
 }

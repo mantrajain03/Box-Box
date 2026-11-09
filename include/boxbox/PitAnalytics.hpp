@@ -60,7 +60,8 @@ public:
     std::vector<DriverPitSummary> allSummaries() const;
 
     /// Total pit loss charged to `driverNumber`, i.e. (stopCount) * pitLoss,
-    /// using the same pitLoss value the race was run with. O(stops).
+    /// using the same pitLoss value the race was run with. O(n) over the log:
+    /// it builds this driver's summary first, so it is NOT O(stops).
     double totalPitLoss(int driverNumber, double pitLoss) const;
 
     /// The inclusive [earliestStopLap, latestStopLap] range across every

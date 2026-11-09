@@ -96,7 +96,9 @@ public:
     ///
     /// COST: O(D) per call for D drivers with overtaking off. With FR-9 on it
     /// is O(D log D): the start-of-lap running order is drained from a
-    /// Leaderboard heap, then walked once.
+    /// Leaderboard heap, then walked once. With an event sink set (see
+    /// setEventSink) each car also pushes up to 5 events, O(log E) apiece for
+    /// E queued events, so a lap then costs O(D log E) more.
     bool advanceLap();
 
     /// Advance until every car has finished. O(N*D) for an N-lap race, or

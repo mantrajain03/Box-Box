@@ -34,6 +34,7 @@
 #include "boxbox/Track.hpp"
 #include "DriverReport.hpp"
 #include "RaceLapReport.hpp"
+#include "StrategyCommands.hpp"
 #include "TireCommands.hpp"
 
 namespace {
@@ -364,6 +365,13 @@ void printUsage(std::ostream& out) {
         "                          Must come after the race options. See\n"
         "                          `boxbox tires help`.\n"
         "\n"
+        "Strategy lab:\n"
+        "  strategy COMMAND ...    Evaluate your own plan, compare strategies, list the\n"
+        "                          K cheapest plans, sweep pit loss or a compound\n"
+        "                          parameter, best plan per stop count, clean air vs\n"
+        "                          traffic. Must come after the race options. See\n"
+        "                          `boxbox strategy help`.\n"
+        "\n"
         "Output:\n"
         "  --show-table            Print the per-compound stint-cost table.\n"
         "  --events                Print the chronological race event log. Implies\n"
@@ -611,6 +619,8 @@ struct Options {
     bool showHelp = false;
     bool tires = false;                  // `tires` subcommand given
     std::vector<std::string> tiresArgs;  // everything after the word `tires`
+    bool strategyLab = false;                  // `strategy` subcommand given
+    std::vector<std::string> strategyArgs;     // everything after the word `strategy`
 };
 
 /// Returns the value that follows `--flag`, or throws if it is missing.
@@ -747,6 +757,13 @@ Options parseArguments(int argc, char** argv) {
                 options.tiresArgs.emplace_back(argv[j]);
             }
             break;
+        } else if (arg == "strategy") {
+            // Likewise: --plan, --compound and friends mean something else here.
+            options.strategyLab = true;
+            for (int j = i + 1; j < argc; ++j) {
+                options.strategyArgs.emplace_back(argv[j]);
+            }
+            break;
         } else {
             throw std::invalid_argument("unrecognised option \"" + arg +
                                         "\"; try --help");
@@ -797,6 +814,9 @@ int main(int argc, char** argv) {
 
         if (options.tires) {
             return boxbox::runTiresCommand(options.tiresArgs, strategy, std::cout, std::cerr);
+        }
+        if (options.strategyLab) {
+            return boxbox::runStrategyCommand(options.strategyArgs, strategy, std::cout, std::cerr);
         }
 
         // Checked before anything is printed, like the FR-9 settings below.

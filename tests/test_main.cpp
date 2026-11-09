@@ -32,6 +32,7 @@
 
 #include "DriverAnalyticsTests.hpp"
 #include "EventTests.hpp"
+#include "StrategyTests.hpp"
 #include "TireModuleTests.hpp"
 
 namespace {
@@ -1444,6 +1445,10 @@ int main() {
     const EventTestTally events = runEventEngineTests();
     g_checks += events.checks;
     g_failures += events.failures;
+
+    const StrategyTestTally strategyLab = runStrategyAnalysisTests();
+    g_checks += strategyLab.checks;
+    g_failures += strategyLab.failures;
 
     std::cout << "\n---------------------\n";
     std::cout << g_checks << " checks, " << g_failures << " failed\n";

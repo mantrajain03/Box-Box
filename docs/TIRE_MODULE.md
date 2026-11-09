@@ -284,7 +284,7 @@ so would reporting only the first crossover: `compareCompounds` gives
 ## Tests
 
 `make test` runs this module's checks as part of the single total the harness
-prints (245,538 checks across all modules on 2026-11-10; the harness does not
+prints (254,839 checks across all modules on 2026-11-10; the harness does not
 print a per-module split, so earlier per-module figures are not repeated).
 They cover:
 
@@ -382,8 +382,9 @@ only the test that reads the message.
 
 ## Benchmarks
 
-`make bench`, -O2. Each time is the median of 5 runs, and correctness is
-checked before any timing. Numbers vary by machine. The table below was
+`make bench`, -O2 (the optimizer, event queue, top-K and deque benchmarks live in
+`benchmarks/bench_strategy.cpp`; see `docs/STRATEGY_MODULE.md`). Each time is the
+median of 5 runs, and correctness is checked before any timing. Numbers vary by machine. The table below was
 measured on Linux with g++ 13; run `make bench` for figures on your own
 machine, including the 1,000 and 10,000 sizes the table omits and the later
 cases (Fenwick linear build against n adds, segment tree update + minimum
@@ -423,7 +424,7 @@ the benchmark exception to NFR-5 himself.
 
 * **Windows: validated 2026-11-10** with `mingw32-make` and g++ 15.2.0
   (MinGW-W64 x86_64-ucrt-posix-seh, target `x86_64-w64-mingw32`): a clean
-  `mingw32-make` with zero warnings, `mingw32-make test` (245,538 checks, 0
+  `mingw32-make` with zero warnings, `mingw32-make test` (254,839 checks, 0
   failed) and `mingw32-make bench` (all correctness checks passed). This is a
   Windows MinGW-W64 toolchain, not an MSYS2 UCRT64 shell; nobody has run it
   under MSYS2 itself.
