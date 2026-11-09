@@ -290,6 +290,19 @@ K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
 - The brute-force check is exported without timings (they would break byte-identical output), so the page shows the
   agreement but not a runtime comparison. Timings belong on the Algorithms page with the benchmarks.
 
+**Phase F (Tires) is built.**
+- `tires` holds each compound's `DegradationProfile` (lap time, wear, cumulative loss, stint cost, cliff), the full
+  range-query matrix from `TireRangeAnalyzer` (sum, mean, minimum, degradation for every age range; omitted for
+  stints over 80 ages), a threshold answer plus bisection steps for 57 limits, and `compareCompounds` for each pair.
+  Each run's `overview.windows` holds `trailingWindows` (monotonic deques plus prefix sums) for every car at 3, 5 and 10 laps.
+- The bisection steps are replayed in the exporter (the core returns only the answer) and checked against
+  `firstAgeDegradationExceeds` for every compound and limit before export.
+- The sliding window runs over a car's race lap times, not a single stint's wear curve. Over a race the lap times rise
+  and fall with tire age and pit stops, so the quickest/slowest band has something to show; on a stint's own curve
+  the minimum would always be the first lap.
+- Not built from section 4.4: the optimal stint-length analysis and the sensitivity to degradation parameters.
+  `compoundSweep` already exists in the core, so this is an export addition when wanted.
+
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.
 - Commit `frontend/data/` or gitignore it (generated).

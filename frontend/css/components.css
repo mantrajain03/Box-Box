@@ -179,6 +179,33 @@ input[type="range"] { accent-color: var(--red); height: 4px; cursor: pointer; }
 .dp-cand { margin-top: 12px; max-width: 520px; }
 .dp-sum { margin-top: 12px; font-size: 13px; line-height: 1.8; }
 
+/* Tires */
+.red { color: var(--red); }
+.green { color: var(--green); }
+.togs { align-items: center; margin: 0 0 8px; }
+.tog {
+  display: inline-flex; align-items: center; cursor: pointer; padding: 3px 10px; border-radius: 99px;
+  background: transparent; border: 1px solid var(--border); color: var(--muted); font: 11.5px var(--font-mono);
+}
+.tog:hover { color: var(--text); border-color: #34344a; }
+.tog.on { color: var(--text); background: var(--panel-2); border-color: #34344a; }
+.tog:not(.on) .swatch { opacity: .35; }
+
+.bs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); gap: 5px; margin-top: 12px; }
+.bs-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 2px; border-radius: 6px;
+  border: 1px solid var(--border); font-family: var(--font-mono);
+}
+.bs-cell.in { background: var(--panel-2); color: var(--text); }
+.bs-cell.out { background: var(--bg); color: var(--muted); opacity: .45; }
+.bs-cell.mid.over { border-color: var(--red); box-shadow: 0 0 9px rgba(255, 45, 61, .55); opacity: 1; }
+.bs-cell.mid.under { border-color: var(--green); box-shadow: 0 0 9px rgba(34, 197, 94, .5); opacity: 1; }
+.bs-cell.answer { border-color: var(--purple); box-shadow: 0 0 10px rgba(168, 85, 247, .65); background: rgba(168, 85, 247, .16); opacity: 1; }
+
+.rng { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.rng .seg-l { min-width: 96px; }
+.rng input[type="range"] { flex: 1; }
+
 .empty { padding: 28px 14px; text-align: center; color: var(--muted); }
 
 .fatal { max-width: 640px; margin: 12vh auto; padding: 0 20px; }

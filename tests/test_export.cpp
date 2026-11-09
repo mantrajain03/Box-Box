@@ -618,6 +618,188 @@ void testBundleScenarios() {
     }
 }
 
+void testBundleTires() {
+    beginSection("Export bundle: tire profiles, range queries, thresholds, windows");
+
+    const Track track = makeTrack(50, 22.0, {28.4, 31.2, 30.4});
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
+    const PitStrategy strategy(track, compounds);
+    std::string failure;
+    const std::string text = bundleFor(strategy, failure);
+    Json root;
+    if (!parseJson(text, root)) {
+        XCHECK_MSG(false, "bundle is not valid JSON");
+        return;
+    }
+
+    try {
+        const Json& tires = root.at("tires");
+        const Json& profiles = tires.at("profiles");
+        XCHECK(profiles.size() == compounds.size());
+        XCHECK_NEAR(tires.at("baseLapTime").number, track.baseLapTime(), boxbox::kTimeEpsilon);
+
+        const Json& limits = tires.at("limits");
+        XCHECK(limits.size() > 10U);
+        XCHECK_NEAR(limits.at(0).number, 0.0, boxbox::kTimeEpsilon);
+        for (std::size_t i = 1; i < limits.size(); ++i) {
+            XCHECK(limits.at(i).number > limits.at(i - 1U).number);
+        }
+
+        for (std::size_t c = 0; c < profiles.size(); ++c) {
+            const Json& p = profiles.at(c);
+            const TireCompound& compound = compounds[c];
+            const std::size_t m = static_cast<std::size_t>(compound.maxStintLaps());
+            XCHECK(p.at("name").text == compound.name());
+            XCHECK(p.at("lapTime").size() == m);
+            XCHECK(p.at("stintCost").size() == m + 1U);
+            XCHECK(p.at("nonDecreasing").boolean);
+
+            // Lap time is the track plus the compound's own model; stint cost is the optimizer's table.
+            std::vector<double> lap;
+            for (std::size_t a = 0; a < m; ++a) {
+                lap.push_back(p.at("lapTime").at(a).number);
+                XCHECK_NEAR(lap.back(), track.baseLapTime() + compound.lapDelta(static_cast<int>(a)), 1.0e-8);
+                XCHECK_NEAR(p.at("degradationVsFresh").at(a).number, lap.back() - lap.front(), 1.0e-8);
+            }
+            for (std::size_t k = 1; k <= m; ++k) {
+                XCHECK_NEAR(p.at("stintCost").at(k).number, strategy.stintCost(c, static_cast<int>(k)), 1.0e-7);
+            }
+            XCHECK_NEAR(p.at("stintCost").at(0).number, 0.0, boxbox::kTimeEpsilon);
+
+            // The cliff.
+            if (compound.hasCliff()) {
+                XCHECK(static_cast<int>(p.at("cliffLap").number + 0.5) == compound.cliffLap());
+                XCHECK(p.at("cliffActivationAge").kind == Json::Kind::Number);
+                XCHECK(p.at("cliffStepSeconds").kind == Json::Kind::Number);
+            }
+
+            // Every range query against a plain scan.
+            const Json& ranges = p.at("ranges");
+            XCHECK(ranges.kind == Json::Kind::Object);
+            for (std::size_t b = 0; b < m; ++b) {
+                double sum = 0.0, lowest = boxbox::kUnreachable, loss = 0.0;
+                for (std::size_t e = b + 1U; e <= m; ++e) {
+                    sum += lap[e - 1U];
+                    lowest = std::min(lowest, lap[e - 1U]);
+                    loss += lap[e - 1U] - lap[0];
+                    const std::size_t i = e - b - 1U;
+                    XCHECK_NEAR(ranges.at("sum").at(b).at(i).number, sum, 1.0e-7);
+                    XCHECK_NEAR(ranges.at("average").at(b).at(i).number, sum / static_cast<double>(e - b), 1.0e-7);
+                    XCHECK_NEAR(ranges.at("min").at(b).at(i).number, lowest, 1.0e-8);
+                    XCHECK_NEAR(ranges.at("degradation").at(b).at(i).number, loss, 1.0e-7);
+                }
+            }
+
+            // Every threshold answer against a plain scan, and every bisection step is legal.
+            const Json& queries = p.at("thresholds");
+            XCHECK(queries.size() == limits.size());
+            for (std::size_t q = 0; q < queries.size(); ++q) {
+                const double limit = limits.at(q).number;
+                int expected = -1;
+                for (std::size_t a = 0; a < m && expected < 0; ++a) {
+                    if (p.at("degradationVsFresh").at(a).number > limit + boxbox::kTimeEpsilon) {
+                        expected = static_cast<int>(a);
+                    }
+                }
+                const Json& answer = queries.at(q).at("age");
+                if (expected < 0) {
+                    XCHECK_MSG(answer.kind == Json::Kind::Null, "no age should exceed this limit");
+                } else {
+                    XCHECK(answer.kind == Json::Kind::Number && static_cast<int>(answer.number + 0.5) == expected);
+                }
+
+                const Json& steps = queries.at(q).at("steps");
+                XCHECK_MSG(steps.size() <= 8U, "bisection over 45 ages takes at most 6-7 steps");
+                if (steps.size() > 0U) {
+                    XCHECK(static_cast<std::size_t>(steps.at(0).at(0).number + 0.5) == 0U);
+                    XCHECK(static_cast<std::size_t>(steps.at(0).at(1).number + 0.5) == m);
+                }
+                for (std::size_t s = 0; s < steps.size(); ++s) {
+                    const double lo = steps.at(s).at(0).number, hi = steps.at(s).at(1).number, mid = steps.at(s).at(2).number;
+                    XCHECK(lo < hi && lo <= mid && mid < hi);
+                }
+            }
+            // The last limit is past every compound's wear, so nothing exceeds it.
+            XCHECK(queries.at(queries.size() - 1U).at("age").kind == Json::Kind::Null);
+        }
+
+        // Pairwise comparison against a plain scan.
+        const Json& comparisons = tires.at("comparisons");
+        XCHECK(comparisons.size() == 3U);
+        for (std::size_t i = 0; i < comparisons.size(); ++i) {
+            const Json& cmp = comparisons.at(i);
+            const std::size_t a = static_cast<std::size_t>(cmp.at("a").number + 0.5);
+            const std::size_t b = static_cast<std::size_t>(cmp.at("b").number + 0.5);
+            const std::size_t both = static_cast<std::size_t>(std::min(compounds[a].maxStintLaps(), compounds[b].maxStintLaps()));
+            XCHECK(static_cast<std::size_t>(cmp.at("agesCompared").number + 0.5) == both);
+            int firstSlower = -1;
+            for (std::size_t age = 0; age < both && firstSlower < 0; ++age) {
+                if (compounds[a].lapDelta(static_cast<int>(age)) > compounds[b].lapDelta(static_cast<int>(age)) + boxbox::kTimeEpsilon) {
+                    firstSlower = static_cast<int>(age);
+                }
+            }
+            if (firstSlower < 0) {
+                XCHECK(cmp.at("firstSlowerAge").kind == Json::Kind::Null);
+            } else {
+                XCHECK(static_cast<int>(cmp.at("firstSlowerAge").number + 0.5) == firstSlower);
+            }
+        }
+
+        // Sliding windows against a plain scan, in both runs.
+        for (const char* name : {"overtakeOff", "overtakeOn"}) {
+            const Json& windows = root.at("race").at("runs").at(name).at("overview").at("windows");
+            XCHECK(windows.at("sizes").size() == 3U);
+            const Json& cars = windows.at("cars");
+            XCHECK(cars.size() == 1U + compounds.size());
+            for (std::size_t ci = 0; ci < cars.size(); ++ci) {
+                const Json& car = cars.at(ci);
+                const Json& times = car.at("lapTimes");
+                XCHECK(times.size() == 50U);
+                for (const std::size_t w : {3U, 5U, 10U}) {
+                    const Json& series = car.at("w" + std::to_string(w));
+                    for (std::size_t k = 0; k < times.size(); ++k) {
+                        const std::size_t first = (k + 1U > w) ? k + 1U - w : 0U;
+                        double lowest = boxbox::kUnreachable, highest = -boxbox::kUnreachable, sum = 0.0;
+                        std::size_t lowestAt = first, highestAt = first;
+                        for (std::size_t j = first; j <= k; ++j) {
+                            const double t = times.at(j).number;
+                            sum += t;
+                            if (t < lowest) { lowest = t; lowestAt = j; }
+                            if (t > highest) { highest = t; highestAt = j; }
+                        }
+                        XCHECK_NEAR(series.at("fastest").at(k).number, lowest, 1.0e-8);
+                        XCHECK_NEAR(series.at("slowest").at(k).number, highest, 1.0e-8);
+                        XCHECK_NEAR(series.at("average").at(k).number, sum / static_cast<double>(k + 1U - first), 1.0e-7);
+                        XCHECK(static_cast<std::size_t>(series.at("fastestLap").at(k).number + 0.5) == lowestAt + 1U);
+                        XCHECK(static_cast<std::size_t>(series.at("slowestLap").at(k).number + 0.5) == highestAt + 1U);
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& error) {
+        XCHECK_MSG(false, std::string("bundle is missing a field: ") + error.what());
+    }
+
+    // A compound with no cliff, one stint too long for the range matrix, and a single compound.
+    {
+        std::vector<TireCompound> custom;
+        custom.emplace_back("LONG", 0.0, 0.01, 120);
+        const PitStrategy longStrategy(makeTrack(10, 20.0, {90.0}), custom);
+        std::string customFailure;
+        const std::string customText = bundleFor(longStrategy, customFailure);
+        Json customRoot;
+        XCHECK_MSG(customFailure.empty(), customFailure);
+        XCHECK(parseJson(customText, customRoot));
+        if (customRoot.kind == Json::Kind::Object) {
+            const Json& p = customRoot.at("tires").at("profiles").at(0);
+            XCHECK(p.at("ranges").kind == Json::Kind::Null);        // 120 ages is over the cap
+            XCHECK(p.at("cliffActivationAge").kind == Json::Kind::Null);
+            XCHECK(static_cast<int>(p.at("cliffLap").number - 0.5) < 0);
+            XCHECK(customRoot.at("tires").at("comparisons").size() == 0U);
+        }
+    }
+}
+
 void testBundleRaceRuns() {
     beginSection("Export bundle: race runs and events");
 
@@ -1038,6 +1220,7 @@ ExportTestTally runExportTests() {
     testBundleStructure();
     testBundleMatchesOptimizer();
     testBundleScenarios();
+    testBundleTires();
     testBundleRaceRuns();
     testTrackOutline();
     testBundleTimeline();

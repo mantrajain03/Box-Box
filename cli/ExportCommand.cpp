@@ -6,6 +6,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 #include "boxbox/RaceEvent.hpp"
 #include "boxbox/RaceState.hpp"
 #include "boxbox/StrategyAnalytics.hpp"
+#include "boxbox/TireAnalytics.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 #include "TrackOutline.hpp"
@@ -369,6 +371,189 @@ double bruteForceBest(const PitStrategy& strategy, int lapsLeft, bool isFirstSti
 }
 
 // ---------------------------------------------------------------------------
+// Tire intelligence
+// ---------------------------------------------------------------------------
+
+/// Points on the threshold slider, roughly.
+constexpr int kThresholdPoints = 60;
+
+/// Longest stint (in ages) for which the full range-query matrix is exported. The
+/// matrix holds M(M+1)/2 answers per compound, so it is capped.
+constexpr std::size_t kMaxRangeAges = 80;
+
+/// Window sizes for the sliding-window view.
+constexpr std::size_t kWindowSizes[] = {3U, 5U, 10U};
+
+/// The smallest "round" step (1, 2, 2.5 or 5 times a power of ten) that is at least `raw`.
+double niceStep(double raw) {
+    if (!(raw > 0.0)) {
+        return 0.25;
+    }
+    const double magnitude = std::pow(10.0, std::floor(std::log10(raw)));
+    for (const double mantissa : {1.0, 2.0, 2.5, 5.0, 10.0}) {
+        if (mantissa * magnitude >= raw) {
+            return mantissa * magnitude;
+        }
+    }
+    return 10.0 * magnitude;
+}
+
+void writeNumbers(JsonWriter& json, const std::vector<double>& values) {
+    json.beginArray();
+    for (const double v : values) {
+        json.number(v);
+    }
+    json.endArray();
+}
+
+/// The `tires` section: each compound's degradation profile, every range query over
+/// its ages, the bisection behind a "first age past a limit" query for a grid of
+/// limits, and how each pair of compounds compares. Everything comes from
+/// TireAnalytics; the bisection is replayed here (the core returns only the answer)
+/// and checked against firstAgeDegradationExceeds before it is trusted.
+bool writeTires(JsonWriter& json, const PitStrategy& strategy, std::string& failure) {
+    const std::vector<DegradationProfile> profiles = buildProfiles(strategy);
+
+    double maxDegradation = 0.0;
+    for (const DegradationProfile& profile : profiles) {
+        maxDegradation = std::max(maxDegradation, profile.degradationVsFresh().back());
+    }
+    const double step = niceStep(maxDegradation / static_cast<double>(kThresholdPoints));
+    const std::size_t limitCount = static_cast<std::size_t>(std::floor(maxDegradation / step)) + 2U;
+    std::vector<double> limits;
+    for (std::size_t i = 0; i < limitCount; ++i) {
+        limits.push_back(static_cast<double>(i) * step);
+    }
+
+    json.beginObject();
+    json.key("baseLapTime").number(strategy.track().baseLapTime());
+
+    json.key("limits");
+    writeNumbers(json, limits);
+
+    json.key("profiles").beginArray();
+    for (std::size_t c = 0; c < profiles.size(); ++c) {
+        const DegradationProfile& profile = profiles[c];
+        const std::vector<double>& d = profile.degradationVsFresh();
+        const std::size_t m = d.size();
+
+        json.beginObject();
+        json.key("compound").integer(static_cast<long long>(c));
+        json.key("name").string(profile.compound());
+        json.key("maxStint").integer(profile.maxStint());
+        json.key("lapTime");              writeNumbers(json, profile.lapTime());
+        json.key("degradationVsFresh");   writeNumbers(json, d);
+        json.key("incremental");          writeNumbers(json, profile.incrementalDegradation());
+        json.key("cumulative");           writeNumbers(json, profile.cumulativeDegradation());
+        json.key("stintCost");            writeNumbers(json, profile.stintCost());
+        json.key("averageLapTime");       writeNumbers(json, profile.averageLapTime());
+        json.key("nonDecreasing").boolean(profile.lapTimeNonDecreasing());
+        json.key("cliffLap").integer(profile.cliffLap() ? *profile.cliffLap() : -1);
+
+        json.key("cliffActivationAge");
+        if (profile.cliffActivationAge()) { json.integer(*profile.cliffActivationAge()); } else { json.null(); }
+        json.key("cliffStepSeconds");
+        if (profile.cliffStepSeconds()) { json.number(*profile.cliffStepSeconds()); } else { json.null(); }
+        json.key("lapTimeChangeAfterCliff");
+        if (profile.lapTimeChangeAfterCliff()) { json.number(*profile.lapTimeChangeAfterCliff()); } else { json.null(); }
+
+        // Every range query over ages [b, e): rows by b, columns by e = b + 1 .. M.
+        const TireRangeAnalyzer analyzer(profile);
+        json.key("fastestAge").integer(static_cast<long long>(analyzer.fastestAge(0, m)));
+        json.key("ranges");
+        if (m > kMaxRangeAges) {
+            json.null();
+        } else {
+            json.beginObject();
+            const auto writeMatrix = [&](const char* name, auto query) {
+                json.key(name).beginArray();
+                for (std::size_t b = 0; b < m; ++b) {
+                    json.beginArray();
+                    for (std::size_t e = b + 1U; e <= m; ++e) {
+                        json.number(query(b, e));
+                    }
+                    json.endArray();
+                }
+                json.endArray();
+            };
+            writeMatrix("sum", [&](std::size_t b, std::size_t e) { return analyzer.lapTimeSum(b, e); });
+            writeMatrix("average", [&](std::size_t b, std::size_t e) { return analyzer.averageLapTime(b, e); });
+            writeMatrix("min", [&](std::size_t b, std::size_t e) { return analyzer.minLapTime(b, e); });
+            writeMatrix("degradation", [&](std::size_t b, std::size_t e) { return analyzer.degradationSum(b, e); });
+            json.endObject();
+        }
+
+        // "First age whose loss against a fresh tire exceeds the limit", for each limit.
+        json.key("thresholds").beginArray();
+        for (const double limit : limits) {
+            const ThresholdResult core = firstAgeDegradationExceeds(profile, limit);
+
+            std::vector<std::vector<long long>> trace;
+            std::optional<int> answer;
+            if (profile.lapTimeNonDecreasing()) {
+                std::size_t lo = 0;
+                std::size_t hi = m;
+                while (lo < hi) {
+                    const std::size_t mid = lo + (hi - lo) / 2U;
+                    const bool exceeds = definitelyLess(limit, d[mid]);
+                    trace.push_back({static_cast<long long>(lo), static_cast<long long>(hi),
+                                     static_cast<long long>(mid), exceeds ? 1LL : 0LL});
+                    if (exceeds) { hi = mid; } else { lo = mid + 1U; }
+                }
+                if (lo < m) { answer = static_cast<int>(lo); }
+            } else {
+                answer = core.value;  // the core scans; there is no bisection to show
+            }
+
+            if (answer != core.value || core.usedBinarySearch != profile.lapTimeNonDecreasing()) {
+                failure = "the bisection replay disagrees with firstAgeDegradationExceeds for " +
+                          profile.compound() + " at limit " + std::to_string(limit);
+                return false;
+            }
+
+            json.beginObject();
+            json.key("age");
+            if (answer) { json.integer(*answer); } else { json.null(); }
+            json.key("binarySearch").boolean(core.usedBinarySearch);
+            json.key("steps").beginArray();
+            for (const std::vector<long long>& row : trace) {
+                json.beginArray().integer(row[0]).integer(row[1]).integer(row[2]).integer(row[3]).endArray();
+            }
+            json.endArray();
+            json.endObject();
+        }
+        json.endArray();
+
+        json.endObject();
+    }
+    json.endArray();
+
+    // How each pair of compounds compares age by age.
+    json.key("comparisons").beginArray();
+    for (std::size_t a = 0; a < profiles.size(); ++a) {
+        for (std::size_t b = a + 1U; b < profiles.size(); ++b) {
+            const CompoundComparison comparison = compareCompounds(profiles[a], profiles[b]);
+            json.beginObject()
+                .key("a").integer(static_cast<long long>(a))
+                .key("b").integer(static_cast<long long>(b))
+                .key("agesCompared").integer(comparison.agesCompared);
+            json.key("firstSlowerAge");
+            if (comparison.firstSlowerAge) { json.integer(*comparison.firstSlowerAge); } else { json.null(); }
+            json.key("switchAges").beginArray();
+            for (const int age : comparison.switchAges) {
+                json.integer(age);
+            }
+            json.endArray();
+            json.endObject();
+        }
+    }
+    json.endArray();
+
+    json.endObject();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Race overview
 // ---------------------------------------------------------------------------
 
@@ -485,6 +670,44 @@ void writeOverview(JsonWriter& json, const PitStrategy& strategy, const LapRecor
             .endObject();
     }
     json.endArray();
+
+    // Sliding windows over each car's lap times: quickest and slowest lap in the last
+    // W laps from two monotonic deques, and the mean from prefix sums (trailingWindows).
+    json.key("windows").beginObject();
+    json.key("sizes").beginArray();
+    for (const std::size_t size : kWindowSizes) {
+        json.integer(static_cast<long long>(size));
+    }
+    json.endArray();
+    json.key("cars").beginArray();
+    for (const DriverSummary& summary : analytics.summaries()) {
+        const std::vector<double>& lapTimes = analytics.lapTimes(summary.driverNumber);
+        json.beginObject();
+        json.key("car").integer(summary.driverNumber);
+        json.key("lapTimes");
+        writeNumbers(json, lapTimes);
+        for (const std::size_t size : kWindowSizes) {
+            const std::vector<LapWindow> windows = trailingWindows(lapTimes, size);
+            std::vector<double> fastest, slowest, average, fastestLap, slowestLap;
+            for (const LapWindow& w : windows) {
+                fastest.push_back(w.fastest);
+                slowest.push_back(w.slowest);
+                average.push_back(w.average);
+                fastestLap.push_back(static_cast<double>(w.fastestLap));
+                slowestLap.push_back(static_cast<double>(w.slowestLap));
+            }
+            json.key("w" + std::to_string(size)).beginObject();
+            json.key("fastest");     writeNumbers(json, fastest);
+            json.key("slowest");     writeNumbers(json, slowest);
+            json.key("average");     writeNumbers(json, average);
+            json.key("fastestLap");  writeNumbers(json, fastestLap);
+            json.key("slowestLap");  writeNumbers(json, slowestLap);
+            json.endObject();
+        }
+        json.endObject();
+    }
+    json.endArray();
+    json.endObject();
 
     json.endObject();
 }
@@ -897,6 +1120,11 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
     json.endArray();
 
     json.endObject();  // strategy
+
+    json.key("tires");
+    if (!writeTires(json, strategy, failure)) {
+        return false;
+    }
 
     // --- race ---------------------------------------------------------------
     json.key("race").beginObject();

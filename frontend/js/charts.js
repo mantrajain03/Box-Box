@@ -29,13 +29,14 @@
     const W = o.width || 640, H = o.height || 250;
     const m = { l: 58, r: 14, t: 12, b: 28 };
     let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-    o.series.forEach(function (s) {
-      s.points.forEach(function (p) {
-        if (!p || !Number.isFinite(p[1])) { return; }
-        xMin = Math.min(xMin, p[0]); xMax = Math.max(xMax, p[0]);
-        yMin = Math.min(yMin, p[1]); yMax = Math.max(yMax, p[1]);
-      });
-    });
+    const bands = o.bands || [];
+    const extend = function (p) {
+      if (!p || !Number.isFinite(p[1])) { return; }
+      xMin = Math.min(xMin, p[0]); xMax = Math.max(xMax, p[0]);
+      yMin = Math.min(yMin, p[1]); yMax = Math.max(yMax, p[1]);
+    };
+    o.series.forEach(function (s) { s.points.forEach(extend); });
+    bands.forEach(function (b) { b.upper.forEach(extend); b.lower.forEach(extend); });
     if (!Number.isFinite(xMin)) { return '<div class="empty">No data</div>'; }
     if (o.xDomain) { xMin = o.xDomain[0]; xMax = o.xDomain[1]; }
     if (xMax <= xMin) { xMax = xMin + 1; }
@@ -57,6 +58,14 @@
     });
     svg += '<line class="axis-l" x1="' + m.l + '" x2="' + (W - m.r) + '" y1="' + (H - m.b) + '" y2="' + (H - m.b) + '"/>';
 
+    // Shaded bands (upper edge forward, lower edge back): drawn under the lines.
+    bands.forEach(function (b) {
+      let d = '';
+      b.upper.forEach(function (p, i) { d += (i === 0 ? 'M' : 'L') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1); });
+      b.lower.slice().reverse().forEach(function (p) { d += 'L' + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1); });
+      svg += '<path d="' + d + 'Z" fill="' + b.color + '" opacity=".16"><title>' + esc(b.name) + '</title></path>';
+    });
+
     o.series.forEach(function (s) {
       let d = '', pen = false;
       s.points.forEach(function (p) {
@@ -65,6 +74,12 @@
         pen = true;
       });
       svg += '<path d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      // Marks (for example a degradation cliff): a triangle pointing at the point.
+      (s.marks || []).forEach(function (mk) {
+        const cx = X(mk[0]).toFixed(1), cy = Y(mk[1]);
+        svg += '<path d="M' + cx + ' ' + (cy - 3).toFixed(1) + 'l-6 -11h12z" fill="var(--yellow)" stroke="var(--bg)" stroke-width="1">' +
+               '<title>' + esc(mk[2] || '') + '</title></path>';
+      });
     });
 
     if (o.marker !== undefined && o.marker >= xMin && o.marker <= xMax) {
@@ -88,7 +103,7 @@
     const m = { l: 30, r: 8, t: 10, b: 28 };
     let max = 0;
     o.items.forEach(function (it) { max = Math.max(max, it.value); });
-    const yt = niceTicks(0, Math.max(max, o.integer ? 2 : 1), 4);
+    const yt = niceTicks(0, o.integer ? Math.max(max, 2) : max, 4);
     const Y = function (v) { return H - m.b - v / yt.hi * (H - m.t - m.b); };
     const slot = (W - m.l - m.r) / o.items.length;
 
