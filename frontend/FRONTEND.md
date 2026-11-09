@@ -318,6 +318,23 @@ K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
 - Clicking a ranking row adds or removes that car, like the picker. Not built from section 4.5: "traffic after pit exits"
   and "performance over race distance" as separate views (traffic lost is on the summary cards and in the range query).
 
+**Phase H (Pit & Events) is built.**
+- Each run carries `pit` from `PitAnalytics`: per-car stops, stop laps, stint lengths, pit time and traffic lost in
+  the 3 laps after each stop (stints are checked to tile the race); field pit time and stint statistics;
+  stops per lap bucket for 1, 3 and 5 laps (from the prefix-sum `StopLapIndex`); the stops in time order; and a greedy
+  `minimumStopLaps` plan for each stop-window width of 0 to 10 laps.
+- The greedy panel is a what-if, not a rule of the engine: "if every stop could move W laps either way, what is the
+  fewest set of laps that puts a pit call inside every window". The tests check each plan against brute force.
+- `strategy.undercut` holds `compareFirstStopLaps` for every pair of first-stop laps (earlier < later < N), as
+  matrices of both totals and the delta; an infeasible plan (a first stint longer than the compound allows) is `null`.
+  Races of 3 to 100 laps only.
+- The queue panel does not replay the heap: each event already carries its insertion order (`seq`) and the log is in
+  release order, so the page shows real events leaving out of order. `queue.inversions` counts the pairs the heap put
+  right, using the core's own `countOrderSwaps` (a Fenwick tree).
+- The engine logs a stop's three events (entry, compound change, exit) at one timestamp, so they appear together.
+- Not built from section 4.6: "traffic after pit exits" as its own chart (it is in the stops-by-car panel and the
+  timeline tooltips) and a separate stint-history view (the timeline is that view).
+
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.
 - Commit `frontend/data/` or gitignore it (generated).

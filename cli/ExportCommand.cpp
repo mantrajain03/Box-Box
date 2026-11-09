@@ -1050,6 +1050,147 @@ bool writeDriverAnalytics(JsonWriter& json, const PitStrategy& strategy, const L
 }
 
 // ---------------------------------------------------------------------------
+// Pit and event analytics
+// ---------------------------------------------------------------------------
+
+constexpr std::size_t kStopBucketSizes[] = {1U, 3U, 5U};
+constexpr int kMaxGreedySlack = 10;        ///< "each stop could move this many laps either way"
+constexpr int kTrafficLapsAfterStop = 3;   ///< laps counted after a stop for traffic
+constexpr int kStintHistogramBin = 5;
+
+/// The `pit` object of one run, all from PitAnalytics and the event log: per-car stops and
+/// stints, stops per lap bucket (prefix sums), the field's stint statistics, the stops in
+/// time order, a greedy "fewest pit calls" plan for each stop-window width, and how far out of
+/// order the event queue received its events (an inversion count, from a Fenwick tree).
+bool writePitAnalytics(JsonWriter& json, const PitStrategy& strategy, const LapRecorder& recorder,
+                       const EventLog& log, std::string& failure) {
+    const DriverAnalytics analytics(recorder);
+    const PitAnalytics pit(log);
+    const int raceLaps = strategy.track().totalLaps();
+    const double pitLoss = strategy.track().pitLoss();
+
+    json.key("pit").beginObject();
+
+    // Per car: stops, stints, pit time, traffic in the laps after each stop.
+    const std::vector<TrafficAfterStop> after =
+        PitAnalytics::trafficAfterStops(analytics.records(), kTrafficLapsAfterStop);
+    json.key("drivers").beginArray();
+    for (const DriverPitSummary& summary : pit.allSummaries()) {
+        const CoverageReport coverage =
+            PitAnalytics::checkStintCoverage(PitAnalytics::stintIntervals(summary), raceLaps);
+        if (!coverage.tiles) {
+            failure = "car " + std::to_string(summary.driverNumber) + "'s stints do not tile the race: " + coverage.message;
+            return false;
+        }
+        json.beginObject().key("car").integer(summary.driverNumber).key("stops").integer(summary.stopCount);
+        json.key("stopLaps").beginArray();
+        for (const int lap : summary.stopLaps) { json.integer(lap); }
+        json.endArray();
+        json.key("stintLengths").beginArray();
+        for (const int laps : summary.stintLengthsLaps) { json.integer(laps); }
+        json.endArray();
+        json.key("compounds").beginArray();
+        for (const int compound : summary.compoundIndicesUsed) { json.integer(compound); }
+        json.endArray();
+        json.key("pitTime").number(pit.totalPitLoss(summary.driverNumber, pitLoss));
+
+        double trafficAfterStops = 0.0;
+        json.key("trafficAfter").beginArray();
+        for (const TrafficAfterStop& t : after) {
+            if (t.driverNumber != summary.driverNumber) { continue; }
+            json.beginObject().key("lap").integer(t.stopLap).key("laps").integer(t.lapsConsidered)
+                .key("seconds").number(t.trafficSeconds).endObject();
+            trafficAfterStops += t.trafficSeconds;
+        }
+        json.endArray();
+        json.key("trafficAfterTotal").number(trafficAfterStops);
+        json.endObject();
+    }
+    json.endArray();
+
+    // The field as a whole.
+    const StintStats stints = pit.fieldStintStats();
+    json.key("field").beginObject();
+    json.key("pitTime").number(pit.fieldPitLoss(pitLoss));
+    json.key("stints").beginObject()
+        .key("count").integer(stints.count).key("shortest").integer(stints.shortestLaps)
+        .key("longest").integer(stints.longestLaps).key("mean").number(stints.meanLaps).endObject();
+    json.key("stintHistogram").beginArray();
+    for (const StintHistogramBin& bin : pit.stintHistogram(kStintHistogramBin)) {
+        json.beginObject().key("from").integer(bin.firstLaps).key("to").integer(bin.lastLaps)
+            .key("count").integer(bin.count).endObject();
+    }
+    json.endArray();
+    json.endObject();
+
+    // Stops per lap bucket, each answered in O(1) from the prefix-sum index.
+    const StopLapIndex index = pit.buildStopIndex(raceLaps);
+    json.key("stopBuckets").beginObject();
+    for (const std::size_t size : kStopBucketSizes) {
+        json.key("b" + std::to_string(size)).beginArray();
+        for (int from = 1; from <= raceLaps; from += static_cast<int>(size)) {
+            const int to = std::min(from + static_cast<int>(size) - 1, raceLaps);
+            json.beginObject().key("from").integer(from).key("to").integer(to)
+                .key("stops").integer(index.stopsInLaps(from, to)).endObject();
+        }
+        json.endArray();
+    }
+    json.endObject();
+
+    // Every stop, in time order.
+    const std::vector<PitStopRecord> stops = pit.chronologicalPitStops();
+    json.key("stops").beginArray();
+    for (const PitStopRecord& stop : stops) {
+        json.beginObject().key("car").integer(stop.driverNumber).key("lap").integer(stop.lap)
+            .key("time").number(stop.time).key("from").integer(stop.fromCompound)
+            .key("to").integer(stop.toCompound).endObject();
+    }
+    json.endArray();
+
+    const PitAnalytics::PitWindow window = pit.pitWindow();
+    json.key("window").beginObject().key("hasStops").boolean(window.hasStops)
+        .key("earliest").integer(window.earliestStopLap).key("latest").integer(window.latestStopLap).endObject();
+
+    // Greedy interval stabbing: if every stop could move `slack` laps either way, the fewest
+    // laps that put a pit call inside every window.
+    json.key("greedy").beginArray();
+    for (int slack = 0; slack <= kMaxGreedySlack; ++slack) {
+        std::vector<StopWindow> windows;
+        for (const PitStopRecord& stop : stops) {
+            StopWindow w;
+            w.driverNumber = stop.driverNumber;
+            w.earliestLap = std::max(1, stop.lap - slack);
+            w.latestLap = std::max(w.earliestLap, std::min(raceLaps - 1, stop.lap + slack));
+            windows.push_back(w);
+        }
+        json.beginObject().key("slack").integer(slack).key("windows").beginArray();
+        for (const StopWindow& w : windows) {
+            json.beginObject().key("car").integer(w.driverNumber).key("earliest").integer(w.earliestLap)
+                .key("latest").integer(w.latestLap).endObject();
+        }
+        json.endArray().key("calls").beginArray();
+        for (const int lap : PitAnalytics::minimumStopLaps(windows)) { json.integer(lap); }
+        json.endArray().endObject();
+    }
+    json.endArray();
+
+    // How out of order the queue's input was. Events get a sequence number as they are
+    // pushed, and the log is in the order they left; the inversions are the pairs the heap
+    // had to put right.
+    std::vector<int> pushedOrder, poppedOrder;
+    for (const RaceEvent& event : log.entries()) { poppedOrder.push_back(static_cast<int>(event.sequenceId)); }
+    pushedOrder = poppedOrder;
+    std::sort(pushedOrder.begin(), pushedOrder.end());
+    json.key("queue").beginObject()
+        .key("events").integer(static_cast<long long>(log.size()))
+        .key("inversions").integer(static_cast<long long>(countOrderSwaps(pushedOrder, poppedOrder)))
+        .endObject();
+
+    json.endObject();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Race replay
 // ---------------------------------------------------------------------------
 
@@ -1169,6 +1310,9 @@ bool writeRun(JsonWriter& json, const PitStrategy& strategy, const OvertakeRule&
     json.key("eventLogValid").boolean(true);
     writeOverview(json, strategy, recorder, log);
     if (!writeDriverAnalytics(json, strategy, recorder, lapIndex, rule, failure)) {
+        return false;
+    }
+    if (!writePitAnalytics(json, strategy, recorder, log, failure)) {
         return false;
     }
     json.key("events").beginArray();
@@ -1460,6 +1604,38 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
         }
     }
     json.endArray();
+
+    // Undercut and overcut: the same car stops at the end of lap `earlier` or lap `later`, then
+    // runs the best continuation (compareFirstStopLaps, which solves each with the optimizer).
+    // Rows by earlier lap 1 .. N-2; columns by later lap earlier+1 .. N-1.
+    json.key("undercut");
+    if (track.totalLaps() < 3 || track.totalLaps() > kMaxRangeLaps) {
+        json.null();
+    } else {
+        const int laps = track.totalLaps();
+        std::vector<std::vector<FirstStopComparison>> grid;
+        for (int earlier = 1; earlier <= laps - 2; ++earlier) {
+            grid.emplace_back();
+            for (int later = earlier + 1; later <= laps - 1; ++later) {
+                grid.back().push_back(compareFirstStopLaps(strategy, earlier, later));
+            }
+        }
+        json.beginObject();
+        json.key("firstCompound").integer(static_cast<long long>(grid.front().front().firstCompound));
+        const auto writeField = [&](const char* name, auto pick) {
+            json.key(name).beginArray();
+            for (const std::vector<FirstStopComparison>& row : grid) {
+                json.beginArray();
+                for (const FirstStopComparison& cell : row) { json.number(pick(cell)); }
+                json.endArray();
+            }
+            json.endArray();
+        };
+        writeField("earlierTotal", [](const FirstStopComparison& c) { return c.result.earlierPlanTotalTime; });
+        writeField("laterTotal", [](const FirstStopComparison& c) { return c.result.laterPlanTotalTime; });
+        writeField("delta", [](const FirstStopComparison& c) { return c.result.timeDeltaSeconds; });
+        json.endObject();
+    }
 
     json.endObject();  // strategy
 

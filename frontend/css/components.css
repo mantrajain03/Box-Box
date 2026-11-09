@@ -80,6 +80,7 @@
 }
 .btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .btn:hover { background: var(--panel-2); border-color: #34344a; }
+.btn:disabled { opacity: .35; cursor: not-allowed; }
 .btn.primary { background: var(--red); border-color: var(--red); color: #fff; box-shadow: 0 0 12px rgba(255, 45, 61, .4); }
 .btn.primary:hover { background: #ff4857; }
 

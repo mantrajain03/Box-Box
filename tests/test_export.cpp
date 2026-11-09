@@ -21,6 +21,7 @@
 #include "boxbox/Common.hpp"
 #include "boxbox/JsonWriter.hpp"
 #include "boxbox/PitStrategy.hpp"
+#include "boxbox/StrategyAnalytics.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
 
@@ -991,6 +992,190 @@ void testBundleDriverAnalytics() {
     }
 }
 
+void testBundlePit() {
+    beginSection("Export bundle: pit analytics, greedy pit calls, queue disorder, undercut grid");
+
+    const Track track = makeTrack(50, 22.0, {28.4, 31.2, 30.4});
+    const PitStrategy strategy(track, boxbox::defaultCompounds());
+    std::string failure;
+    const std::string text = bundleFor(strategy, failure);
+    XCHECK_MSG(failure.empty(), failure);
+    Json root;
+    if (!parseJson(text, root)) {
+        XCHECK_MSG(false, "bundle is not valid JSON");
+        return;
+    }
+
+    try {
+        const int N = 50;
+
+        for (const char* name : {"overtakeOff", "overtakeOn"}) {
+            const Json& run = root.at("race").at("runs").at(name);
+            const Json& pit = run.at("pit");
+
+            // Every stop in the lap rows, found by a plain scan.
+            std::vector<std::pair<int, int>> stops;   // (lap, car)
+            for (std::size_t l = 0; l < run.at("laps").size(); ++l) {
+                const Json& order = run.at("laps").at(l).at("order");
+                for (std::size_t p = 0; p < order.size(); ++p) {
+                    if (order.at(p).at("pitted").boolean) {
+                        stops.push_back({static_cast<int>(run.at("laps").at(l).at("lap").number + 0.5),
+                                         static_cast<int>(order.at(p).at("car").number + 0.5)});
+                    }
+                }
+            }
+
+            // Per car: the stop laps match, the stints tile the race, pit time is stops x pit loss.
+            int total = 0;
+            for (std::size_t d = 0; d < pit.at("drivers").size(); ++d) {
+                const Json& car = pit.at("drivers").at(d);
+                const int number = static_cast<int>(car.at("car").number + 0.5);
+                std::vector<int> expected;
+                for (const auto& s : stops) { if (s.second == number) { expected.push_back(s.first); } }
+                std::sort(expected.begin(), expected.end());
+                XCHECK(car.at("stopLaps").size() == expected.size());
+                for (std::size_t i = 0; i < expected.size() && i < car.at("stopLaps").size(); ++i) {
+                    XCHECK(static_cast<int>(car.at("stopLaps").at(i).number + 0.5) == expected[i]);
+                }
+                int covered = 0;
+                for (std::size_t i = 0; i < car.at("stintLengths").size(); ++i) {
+                    covered += static_cast<int>(car.at("stintLengths").at(i).number + 0.5);
+                }
+                XCHECK(covered == N);
+                XCHECK(car.at("stintLengths").size() == expected.size() + 1U);
+                XCHECK_NEAR(car.at("pitTime").number, 22.0 * static_cast<double>(expected.size()), boxbox::kTimeEpsilon);
+                XCHECK(car.at("trafficAfter").size() == expected.size());
+                total += static_cast<int>(expected.size());
+            }
+            XCHECK(total == static_cast<int>(stops.size()));
+            XCHECK_NEAR(pit.at("field").at("pitTime").number, 22.0 * static_cast<double>(total), boxbox::kTimeEpsilon);
+            XCHECK(static_cast<int>(pit.at("field").at("stints").at("count").number + 0.5) == total + static_cast<int>(pit.at("drivers").size()));
+
+            // Stops per lap bucket against a plain count.
+            for (const std::size_t size : {1U, 3U, 5U}) {
+                const Json& buckets = pit.at("stopBuckets").at("b" + std::to_string(size));
+                int counted = 0;
+                for (std::size_t b = 0; b < buckets.size(); ++b) {
+                    const int from = static_cast<int>(buckets.at(b).at("from").number + 0.5);
+                    const int to = static_cast<int>(buckets.at(b).at("to").number + 0.5);
+                    int expected = 0;
+                    for (const auto& s : stops) { if (s.first >= from && s.first <= to) { ++expected; } }
+                    XCHECK(static_cast<int>(buckets.at(b).at("stops").number + 0.5) == expected);
+                    counted += expected;
+                }
+                XCHECK(counted == total);
+                XCHECK(static_cast<int>(buckets.at(buckets.size() - 1U).at("to").number + 0.5) == N);
+            }
+
+            // Chronological stops, and the pit window.
+            const Json& chrono = pit.at("stops");
+            XCHECK(chrono.size() == stops.size());
+            for (std::size_t i = 1; i < chrono.size(); ++i) {
+                XCHECK(chrono.at(i).at("time").number >= chrono.at(i - 1U).at("time").number);
+            }
+            int earliest = N, latest = 0;
+            for (const auto& s : stops) { earliest = std::min(earliest, s.first); latest = std::max(latest, s.first); }
+            XCHECK(static_cast<int>(pit.at("window").at("earliest").number + 0.5) == earliest);
+            XCHECK(static_cast<int>(pit.at("window").at("latest").number + 0.5) == latest);
+
+            // Greedy pit calls: every window holds a call, and no smaller set of laps would do.
+            const Json& greedy = pit.at("greedy");
+            XCHECK(greedy.size() == 11U);
+            for (std::size_t g = 0; g < greedy.size(); ++g) {
+                const Json& entry = greedy.at(g);
+                std::vector<std::pair<int, int>> windows;
+                for (std::size_t w = 0; w < entry.at("windows").size(); ++w) {
+                    windows.push_back({static_cast<int>(entry.at("windows").at(w).at("earliest").number + 0.5),
+                                       static_cast<int>(entry.at("windows").at(w).at("latest").number + 0.5)});
+                }
+                XCHECK(windows.size() == stops.size());
+                std::vector<int> calls;
+                for (std::size_t c = 0; c < entry.at("calls").size(); ++c) { calls.push_back(static_cast<int>(entry.at("calls").at(c).number + 0.5)); }
+
+                const auto coversAll = [&](const std::vector<int>& chosen) {
+                    for (const auto& w : windows) {
+                        bool hit = false;
+                        for (const int lap : chosen) { hit = hit || (lap >= w.first && lap <= w.second); }
+                        if (!hit) { return false; }
+                    }
+                    return true;
+                };
+                XCHECK_MSG(coversAll(calls), "every stop window must contain a pit call");
+
+                // Minimality, by trying every smaller set (only when it is cheap to).
+                if (calls.size() >= 1U && calls.size() - 1U <= 2U) {
+                    bool smaller = false;
+                    if (calls.size() == 1U) { smaller = windows.empty(); }
+                    else if (calls.size() == 2U) { for (int a = 1; a < N && !smaller; ++a) { smaller = coversAll({a}); } }
+                    else { for (int a = 1; a < N && !smaller; ++a) { for (int b = a; b < N && !smaller; ++b) { smaller = coversAll({a, b}); } } }
+                    XCHECK_MSG(!smaller, "the greedy plan must use the fewest possible calls");
+                }
+                if (g > 0U) {
+                    XCHECK_MSG(calls.size() <= static_cast<std::size_t>(greedy.at(g - 1U).at("calls").size()),
+                               "wider windows never need more calls");
+                }
+            }
+
+            // The queue: events counted, and the inversions against a plain pair count.
+            const Json& events = run.at("events");
+            XCHECK(static_cast<std::size_t>(pit.at("queue").at("events").number + 0.5) == events.size());
+            long long inversions = 0;
+            for (std::size_t i = 0; i < events.size(); ++i) {
+                for (std::size_t j = i + 1U; j < events.size(); ++j) {
+                    if (events.at(i).at("seq").number > events.at(j).at("seq").number) { ++inversions; }
+                }
+            }
+            XCHECK(static_cast<long long>(pit.at("queue").at("inversions").number + 0.5) == inversions);
+        }
+
+        // The undercut grid against the core, pair by pair.
+        const Json& u = root.at("strategy").at("undercut");
+        XCHECK(u.at("delta").size() == static_cast<std::size_t>(N - 2));
+        const double optimum = strategy.optimize().totalTime;
+        for (int earlier = 1; earlier <= N - 2; ++earlier) {
+            const Json& row = u.at("earlierTotal").at(static_cast<std::size_t>(earlier - 1));
+            XCHECK(row.size() == static_cast<std::size_t>(N - 1 - earlier));
+            for (int later = earlier + 1; later <= N - 1; ++later) {
+                const std::size_t r = static_cast<std::size_t>(earlier - 1), c = static_cast<std::size_t>(later - earlier - 1);
+                const boxbox::FirstStopComparison expected = boxbox::compareFirstStopLaps(strategy, earlier, later);
+                const Json& a = u.at("earlierTotal").at(r).at(c);
+                const Json& b = u.at("laterTotal").at(r).at(c);
+                const Json& d = u.at("delta").at(r).at(c);
+                const double ea = expected.result.earlierPlanTotalTime, eb = expected.result.laterPlanTotalTime;
+                XCHECK(std::isfinite(ea) == (a.kind == Json::Kind::Number));
+                XCHECK(std::isfinite(eb) == (b.kind == Json::Kind::Number));
+                if (a.kind == Json::Kind::Number) {
+                    XCHECK_NEAR(a.number, ea, 1.0e-7);
+                    XCHECK_MSG(a.number >= optimum - boxbox::kClosureTolerance, "no plan beats the optimum");
+                }
+                if (b.kind == Json::Kind::Number) { XCHECK_NEAR(b.number, eb, 1.0e-7); }
+                if (a.kind == Json::Kind::Number && b.kind == Json::Kind::Number) {
+                    XCHECK(d.kind == Json::Kind::Number);
+                    XCHECK_NEAR(d.number, b.number - a.number, 1.0e-7);   // positive: stopping earlier is faster
+                } else {
+                    XCHECK(d.kind == Json::Kind::Null);
+                }
+            }
+        }
+    } catch (const std::exception& error) {
+        XCHECK_MSG(false, std::string("bundle is missing a field: ") + error.what());
+    }
+
+    // Too short or too long for the grid: null, and the rest of the bundle is unaffected.
+    for (const int laps : {2, 101}) {
+        const PitStrategy other(makeTrack(laps, 22.0, {28.4, 31.2, 30.4}), boxbox::defaultCompounds());
+        std::string otherFailure;
+        const std::string otherText = bundleFor(other, otherFailure);
+        Json otherRoot;
+        XCHECK_MSG(otherFailure.empty(), otherFailure);
+        XCHECK(parseJson(otherText, otherRoot));
+        if (otherRoot.kind == Json::Kind::Object) {
+            XCHECK(otherRoot.at("strategy").at("undercut").kind == Json::Kind::Null);
+            XCHECK(otherRoot.at("race").at("runs").at("overtakeOff").at("pit").at("greedy").size() == 11U);
+        }
+    }
+}
+
 void testBundleRaceRuns() {
     beginSection("Export bundle: race runs and events");
 
@@ -1413,6 +1598,7 @@ ExportTestTally runExportTests() {
     testBundleScenarios();
     testBundleTires();
     testBundleDriverAnalytics();
+    testBundlePit();
     testBundleRaceRuns();
     testTrackOutline();
     testBundleTimeline();
