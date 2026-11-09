@@ -26,6 +26,7 @@
 #include "boxbox/TireAnalytics.hpp"
 #include "boxbox/TireCompound.hpp"
 #include "boxbox/Track.hpp"
+#include "AlgorithmCatalog.hpp"
 #include "TrackOutline.hpp"
 
 namespace boxbox {
@@ -349,7 +350,11 @@ TraceOutcome writeDpTrace(JsonWriter& json, const PitStrategy& strategy) {
 
 /// Exhaustive reference for a short race. Written without reference to the DP,
 /// so agreement between the two means something.
-double bruteForceBest(const PitStrategy& strategy, int lapsLeft, bool isFirstStint) {
+double bruteForceBest(const PitStrategy& strategy, int lapsLeft, bool isFirstStint,
+                      long long* calls = nullptr) {
+    if (calls != nullptr) {
+        ++*calls;  // counted by the reference itself, for the Algorithms page's growth chart
+    }
     if (lapsLeft == 0) {
         return 0.0;
     }
@@ -357,7 +362,7 @@ double bruteForceBest(const PitStrategy& strategy, int lapsLeft, bool isFirstSti
     for (std::size_t c = 0; c < strategy.compounds().size(); ++c) {
         const int longest = std::min(lapsLeft, strategy.compounds()[c].maxStintLaps());
         for (int length = 1; length <= longest; ++length) {
-            const double rest = bruteForceBest(strategy, lapsLeft - length, false);
+            const double rest = bruteForceBest(strategy, lapsLeft - length, false, calls);
             if (!isReachable(rest)) {
                 continue;
             }
@@ -1050,6 +1055,137 @@ bool writeDriverAnalytics(JsonWriter& json, const PitStrategy& strategy, const L
 }
 
 // ---------------------------------------------------------------------------
+// Algorithms: the catalog, and operation counts (counted, never timed)
+// ---------------------------------------------------------------------------
+
+/// Longest race the brute-force reference is counted on. Its calls grow roughly 4x per lap
+/// with three compounds, so this keeps the export fast.
+constexpr int kGrowthLaps = 12;
+
+/// How many candidates optimize() evaluates for an n-lap race: for each lap, one per legal
+/// stint length per compound. The same loop bounds as the optimizer's inner loops.
+long long dpTransitions(const PitStrategy& strategy, int laps) {
+    long long count = 0;
+    for (int lap = 1; lap <= laps; ++lap) {
+        for (const TireCompound& compound : strategy.compounds()) {
+            count += std::min(lap, compound.maxStintLaps());
+        }
+    }
+    return count;
+}
+
+/// What a range query costs on average, over every range of an n-lap race: the segment-tree
+/// nodes added, the Fenwick nodes added and subtracted, and the laps a plain scan would read.
+struct RangeCostMeans {
+    double segmentNodes = 0.0;
+    double fenwickNodes = 0.0;
+    double scanLaps = 0.0;
+    std::size_t segmentMax = 0;
+};
+
+RangeCostMeans rangeCostMeans(std::size_t n) {
+    const SegmentLayout layout(n);
+    double segment = 0.0, fenwick = 0.0, scan = 0.0;
+    std::size_t queries = 0, segmentMax = 0;
+    for (std::size_t b = 0; b < n; ++b) {
+        for (std::size_t e = b + 1U; e <= n; ++e) {
+            const std::size_t nodes = layout.nodes(b, e).size();
+            segment += static_cast<double>(nodes);
+            segmentMax = std::max(segmentMax, nodes);
+            fenwick += static_cast<double>(fenwickNodes(e).size() + fenwickNodes(b).size());
+            scan += static_cast<double>(e - b);
+            ++queries;
+        }
+    }
+    RangeCostMeans means;
+    const double q = static_cast<double>(queries);
+    means.segmentNodes = segment / q;
+    means.fenwickNodes = fenwick / q;
+    means.scanLaps = scan / q;
+    means.segmentMax = segmentMax;
+    return means;
+}
+
+/// The `algorithms` section: the catalog (with the source files each entry cites), the
+/// brute-force reference's calls against the DP's candidate evaluations for races of 1 to
+/// kGrowthLaps laps, and the average work of a range query against a scan. Everything here is
+/// a count, so it is the same on every machine; `make bench` times the same structures.
+void writeAlgorithms(JsonWriter& json, const PitStrategy& strategy) {
+    json.beginObject();
+
+    json.key("catalog").beginArray();
+    for (const AlgorithmInfo& info : algorithmCatalog()) {
+        json.beginObject()
+            .key("id").string(info.id)
+            .key("name").string(info.name)
+            .key("category").string(info.category)
+            .key("purpose").string(info.purpose);
+        json.key("files").beginArray();
+        for (const std::string& file : info.files) { json.string(file); }
+        json.endArray();
+        json.key("costs").beginArray();
+        for (const AlgorithmCost& cost : info.costs) {
+            json.beginObject().key("operation").string(cost.operation).key("cost").string(cost.cost).endObject();
+        }
+        json.endArray();
+        json.key("note").string(info.note);
+        json.key("usedIn").beginArray();
+        for (const std::string& page : info.usedIn) { json.string(page); }
+        json.endArray();
+        json.endObject();
+    }
+    json.endArray();
+
+    json.key("growth").beginObject();
+
+    json.key("dp").beginObject();
+    json.key("laps").beginArray();
+    for (int laps = 1; laps <= kGrowthLaps; ++laps) { json.integer(laps); }
+    json.endArray();
+    json.key("bruteForceCalls").beginArray();
+    for (int laps = 1; laps <= kGrowthLaps; ++laps) {
+        long long calls = 0;
+        bruteForceBest(strategy, laps, true, &calls);
+        json.integer(calls);
+    }
+    json.endArray();
+    json.key("dpTransitions").beginArray();
+    for (int laps = 1; laps <= kGrowthLaps; ++laps) { json.integer(dpTransitions(strategy, laps)); }
+    json.endArray();
+    json.key("raceLaps").integer(strategy.track().totalLaps());
+    json.key("raceTransitions").integer(dpTransitions(strategy, strategy.track().totalLaps()));
+    json.endObject();
+
+    json.key("ranges");
+    const int raceLaps = strategy.track().totalLaps();
+    if (raceLaps > kMaxRangeLaps) {
+        json.null();
+    } else {
+        std::vector<std::size_t> sizes;
+        for (std::size_t n = 10U; n <= static_cast<std::size_t>(kMaxRangeLaps); n += 10U) { sizes.push_back(n); }
+        sizes.push_back(static_cast<std::size_t>(raceLaps));
+        std::sort(sizes.begin(), sizes.end());
+        sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+
+        json.beginObject().key("points").beginArray();
+        for (const std::size_t n : sizes) {
+            const RangeCostMeans means = rangeCostMeans(n);
+            json.beginObject()
+                .key("laps").integer(static_cast<long long>(n))
+                .key("segmentMean").number(means.segmentNodes)
+                .key("segmentMax").integer(static_cast<long long>(means.segmentMax))
+                .key("fenwickMean").number(means.fenwickNodes)
+                .key("scanMean").number(means.scanLaps)
+                .endObject();
+        }
+        json.endArray().endObject();
+    }
+
+    json.endObject();  // growth
+    json.endObject();
+}
+
+// ---------------------------------------------------------------------------
 // Pit and event analytics
 // ---------------------------------------------------------------------------
 
@@ -1651,6 +1787,9 @@ bool writeBundleJson(std::ostream& out, const PitStrategy& strategy, const Expor
     } else {
         writeStructures(json, static_cast<std::size_t>(track.totalLaps()));
     }
+
+    json.key("algorithms");
+    writeAlgorithms(json, strategy);
 
     // --- race ---------------------------------------------------------------
     json.key("race").beginObject();

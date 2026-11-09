@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -1176,6 +1177,153 @@ void testBundlePit() {
     }
 }
 
+void testBundleAlgorithms() {
+    beginSection("Export bundle: algorithm catalog and operation counts");
+
+    const std::vector<TireCompound> compounds = boxbox::defaultCompounds();
+    const PitStrategy strategy(makeTrack(50, 22.0, {28.4, 31.2, 30.4}), compounds);
+    std::string failure;
+    const std::string text = bundleFor(strategy, failure);
+    XCHECK_MSG(failure.empty(), failure);
+    Json root;
+    if (!parseJson(text, root)) {
+        XCHECK_MSG(false, "bundle is not valid JSON");
+        return;
+    }
+
+    try {
+        const Json& algorithms = root.at("algorithms");
+        const Json& catalog = algorithms.at("catalog");
+        XCHECK(catalog.size() == 12U);
+
+        // Every card is complete, ids are unique, and every page it names exists.
+        const std::vector<std::string> pages = {"command", "sim", "lab", "tires", "drivers", "pit", "battle", "algo"};
+        std::vector<std::string> ids;
+        for (std::size_t i = 0; i < catalog.size(); ++i) {
+            const Json& a = catalog.at(i);
+            XCHECK(!a.at("id").text.empty() && !a.at("name").text.empty() && !a.at("purpose").text.empty());
+            XCHECK(std::find(ids.begin(), ids.end(), a.at("id").text) == ids.end());
+            ids.push_back(a.at("id").text);
+            XCHECK(a.at("files").size() >= 1U && a.at("costs").size() >= 1U && a.at("usedIn").size() >= 1U);
+            for (std::size_t c = 0; c < a.at("costs").size(); ++c) {
+                XCHECK(!a.at("costs").at(c).at("operation").text.empty() && !a.at("costs").at(c).at("cost").text.empty());
+            }
+            for (std::size_t u = 0; u < a.at("usedIn").size(); ++u) {
+                XCHECK_MSG(std::find(pages.begin(), pages.end(), a.at("usedIn").at(u).text) != pages.end(),
+                           "unknown page " + a.at("usedIn").at(u).text);
+            }
+        }
+
+        // Traceability: every file a card cites exists. Tests run from the repository root
+        // (make test); from anywhere else the paths cannot be checked, so this is skipped.
+        if (std::filesystem::exists("include/boxbox") && std::filesystem::exists("src")) {
+            for (std::size_t i = 0; i < catalog.size(); ++i) {
+                for (std::size_t f = 0; f < catalog.at(i).at("files").size(); ++f) {
+                    const std::string path = catalog.at(i).at("files").at(f).text;
+                    XCHECK_MSG(std::filesystem::exists(path), "the catalog cites a file that does not exist: " + path);
+                }
+            }
+        }
+
+        // Brute-force calls against an independent memoised recurrence; DP candidates against a plain sum.
+        const Json& dp = algorithms.at("growth").at("dp");
+        XCHECK(dp.at("laps").size() == 12U);
+        std::vector<long long> calls(13U, 0);
+        calls[0] = 1;
+        for (int n = 1; n <= 12; ++n) {
+            long long total = 1;
+            for (const TireCompound& compound : compounds) {
+                for (int l = 1; l <= std::min(n, compound.maxStintLaps()); ++l) { total += calls[static_cast<std::size_t>(n - l)]; }
+            }
+            calls[static_cast<std::size_t>(n)] = total;
+        }
+        const auto transitions = [&](int laps) {
+            long long total = 0;
+            for (int lap = 1; lap <= laps; ++lap) {
+                for (const TireCompound& compound : compounds) { total += std::min(lap, compound.maxStintLaps()); }
+            }
+            return total;
+        };
+        for (int n = 1; n <= 12; ++n) {
+            const std::size_t i = static_cast<std::size_t>(n - 1);
+            XCHECK(static_cast<long long>(dp.at("bruteForceCalls").at(i).number + 0.5) == calls[static_cast<std::size_t>(n)]);
+            XCHECK(static_cast<long long>(dp.at("dpTransitions").at(i).number + 0.5) == transitions(n));
+            if (n > 1) {
+                XCHECK(dp.at("bruteForceCalls").at(i).number > dp.at("bruteForceCalls").at(i - 1U).number);
+            }
+        }
+        XCHECK_MSG(dp.at("bruteForceCalls").at(11).number > 1000.0 * dp.at("dpTransitions").at(11).number,
+                   "twelve laps: the reference makes thousands of times the DP's evaluations");
+        XCHECK(static_cast<long long>(dp.at("raceTransitions").number + 0.5) == transitions(50));
+
+        // Range-query work against independent counts. A scan of a random range reads (n + 2) / 3 laps on average.
+        const Json& points = algorithms.at("growth").at("ranges").at("points");
+        bool sawRace = false;
+        for (std::size_t p = 0; p < points.size(); ++p) {
+            const std::size_t n = static_cast<std::size_t>(points.at(p).at("laps").number + 0.5);
+            XCHECK_NEAR(points.at(p).at("scanMean").number, static_cast<double>(n + 2U) / 3.0, 1.0e-9);
+            if (n < 10U) { continue; }
+            XCHECK(points.at(p).at("segmentMean").number < points.at(p).at("scanMean").number);
+            XCHECK(points.at(p).at("fenwickMean").number < points.at(p).at("scanMean").number);
+            std::size_t floorLog = 0;
+            for (std::size_t v = n; v > 1U; v /= 2U) { ++floorLog; }
+            XCHECK_MSG(static_cast<std::size_t>(points.at(p).at("segmentMax").number + 0.5) <= 2U * (floorLog + 1U), "at most two nodes per level");
+
+            if (n == 50U) {
+                sawRace = true;
+                // The same walk, written out again here.
+                double nodes = 0.0;
+                std::size_t queries = 0;
+                for (std::size_t b = 0; b < n; ++b) {
+                    for (std::size_t e = b + 1U; e <= n; ++e) {
+                        for (std::size_t lo = b + n, hi = e + n; lo < hi; lo /= 2U, hi /= 2U) {
+                            if ((lo & 1U) != 0U) { ++lo; nodes += 1.0; }
+                            if ((hi & 1U) != 0U) { --hi; nodes += 1.0; }
+                        }
+                        ++queries;
+                    }
+                }
+                XCHECK_NEAR(points.at(p).at("segmentMean").number, nodes / static_cast<double>(queries), 1.0e-9);
+            }
+        }
+        XCHECK_MSG(sawRace, "the race's own length is one of the points");
+    } catch (const std::exception& error) {
+        XCHECK_MSG(false, std::string("bundle is missing a field: ") + error.what());
+    }
+
+    // Past the range cap the range-work counts are omitted; the DP counts and the catalog stay.
+    {
+        const PitStrategy longRace(makeTrack(101, 22.0, {28.4, 31.2, 30.4}), compounds);
+        std::string longFailure;
+        const std::string longText = bundleFor(longRace, longFailure);
+        Json longRoot;
+        XCHECK_MSG(longFailure.empty(), longFailure);
+        XCHECK(parseJson(longText, longRoot));
+        if (longRoot.kind == Json::Kind::Object) {
+            XCHECK(longRoot.at("algorithms").at("growth").at("ranges").kind == Json::Kind::Null);
+            XCHECK(longRoot.at("algorithms").at("catalog").size() == 12U);
+            XCHECK(longRoot.at("algorithms").at("growth").at("dp").at("dpTransitions").size() == 12U);
+        }
+    }
+
+    // A single compound, as a user might set up: the counts still hold.
+    {
+        std::vector<TireCompound> one;
+        one.emplace_back("ONLY", 0.0, 0.05, 6);
+        const PitStrategy small(makeTrack(10, 15.0, {90.0}), one);
+        std::string smallFailure;
+        const std::string smallText = bundleFor(small, smallFailure);
+        Json smallRoot;
+        XCHECK_MSG(smallFailure.empty(), smallFailure);
+        XCHECK(parseJson(smallText, smallRoot));
+        if (smallRoot.kind == Json::Kind::Object) {
+            const Json& d = smallRoot.at("algorithms").at("growth").at("dp");
+            XCHECK(static_cast<long long>(d.at("bruteForceCalls").at(0).number + 0.5) == 2);   // the call itself plus one stint of 1 lap
+            XCHECK(static_cast<long long>(d.at("dpTransitions").at(0).number + 0.5) == 1);
+        }
+    }
+}
+
 void testBundleRaceRuns() {
     beginSection("Export bundle: race runs and events");
 
@@ -1599,6 +1747,7 @@ ExportTestTally runExportTests() {
     testBundleTires();
     testBundleDriverAnalytics();
     testBundlePit();
+    testBundleAlgorithms();
     testBundleRaceRuns();
     testTrackOutline();
     testBundleTimeline();

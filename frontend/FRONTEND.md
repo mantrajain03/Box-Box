@@ -335,6 +335,21 @@ K. Polish (consistency, empty states, keyboard, no-dead-controls audit).
 - Not built from section 4.6: "traffic after pit exits" as its own chart (it is in the stops-by-car panel and the
   timeline tooltips) and a separate stint-history view (the timeline is that view).
 
+**Phase J (Algorithms) is built. Phase I (Battle) was skipped and is still unbuilt; it shows as SOON in the rail.**
+- `algorithms.catalog` (from `cli/AlgorithmCatalog.cpp`) has 12 entries: purpose, the source files, the cost of each
+  operation, a note, and the pages that use it. Costs are quoted from the headers and `docs/COMPLEXITY_AUDIT.md`, not
+  derived. A test checks that every file a card cites exists (when run from the repository root).
+- `algorithms.growth` holds **operation counts, never timings** (timings would break byte-identical exports):
+  the brute-force reference's recursive calls (counted by the reference itself) against the DP's candidate evaluations for
+  1 to 12 laps, and the average segment-tree nodes, Fenwick nodes and scan length per range query for races of 10 to 100
+  laps. The tests recompute both against independent code. These show the shape of the growth; they do not prove a bound.
+- Each card has a demo driven by exported results: DP cells, the leaderboard heap popping, the prefix table, the node
+  lists for a segment-tree and a Fenwick query, a sliding window, the queue's disorder, the bisection steps, top-K laps,
+  the greedy pit calls, the overtaking rule's effect, and a hash lookup. The category filter and the overtake toggle apply.
+- The node-strip drawing moved from the Drivers page into `charts.js`, shared by both pages.
+- The page controls and segmented controls now scroll inside their own box on narrow screens, which fixed a
+  horizontal overflow at 400 px.
+
 ## 10. Open items needing the project owner
 - Update CLAUDE.md rule 2 / GUI section and PRD Phase 6 / §9 Q3 (ImGui → web frontend). Not edited by Claude.
 - Commit `frontend/data/` or gitignore it (generated).

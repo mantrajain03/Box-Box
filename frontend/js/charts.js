@@ -174,5 +174,35 @@
     return html;
   };
 
+  /**
+   * Tree nodes as bars under a lap axis, with the queried laps shaded. n = laps in the race,
+   * rows = [{label, color, nodes:[[id, firstLap, lastLap]]}], from..to = the queried laps (inclusive).
+   */
+  charts.nodeStrip = function (n, rows, from, to) {
+    const W = 620, rowH = 22, labelH = 15, gap = 10, top = 4;
+    const H = top + rows.length * (labelH + rowH + gap) + 18;
+    const x = function (lap) { return lap / n * W; };
+    let s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Tree nodes touched by the query">';
+    s += '<rect x="' + x(from - 1).toFixed(1) + '" y="0" width="' + (x(to) - x(from - 1)).toFixed(1) + '" height="' + (H - 16) + '" fill="var(--text)" opacity=".06"/>';
+    rows.forEach(function (row, i) {
+      const y = top + i * (labelH + rowH + gap);
+      s += '<text x="0" y="' + (y + 10) + '">' + esc(row.label) + '</text>';
+      row.nodes.forEach(function (nd) {
+        const x0 = x(nd[1] - 1), w = Math.max(x(nd[2]) - x0 - 1.5, 2);
+        s += '<rect x="' + x0.toFixed(1) + '" y="' + (y + labelH) + '" width="' + w.toFixed(1) + '" height="' + rowH + '" rx="3" fill="' + row.color + '" opacity=".85">' +
+             '<title>Node ' + nd[0] + ': laps ' + nd[1] + '–' + nd[2] + '</title></rect>';
+        if (w > 26) {
+          s += '<text x="' + (x0 + w / 2).toFixed(1) + '" y="' + (y + labelH + 15) + '" text-anchor="middle" style="fill:#0b0b10;font-weight:700">' + nd[0] + '</text>';
+        }
+      });
+    });
+    const axisY = H - 16;
+    s += '<line class="axis-l" x1="0" x2="' + W + '" y1="' + axisY + '" y2="' + axisY + '"/>';
+    for (let lap = 0; lap <= n; lap += 10) {
+      s += '<text x="' + x(lap).toFixed(1) + '" y="' + (H - 3) + '" text-anchor="' + (lap === 0 ? 'start' : 'middle') + '">' + lap + '</text>';
+    }
+    return s + '</svg>';
+  };
+
   BB.charts = charts;
 })(window.BB = window.BB || {});
